@@ -1,7 +1,7 @@
 # app/auth/security.py
 import os, time, uuid, secrets, datetime as dt
 from passlib.context import CryptContext
-import jwt
+import jwt 
 
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 

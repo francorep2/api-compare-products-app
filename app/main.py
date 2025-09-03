@@ -1,4 +1,9 @@
 # app/main.py
+
+import sys, asyncio
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 from app.core.browser import browser_manager
