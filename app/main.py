@@ -1,4 +1,6 @@
 # app/main.py
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv())  
 
 import sys, asyncio
 if sys.platform.startswith("win"):
