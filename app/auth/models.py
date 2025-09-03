@@ -1,0 +1,30 @@
+# app/auth/models.py
+from sqlalchemy import String, Integer, Boolean, DateTime, ForeignKey, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.db import Base
+import uuid
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped["DateTime"] = mapped_column(DateTime, server_default=func.now())
+
+    otps: Mapped[list["OTPCode"]] = relationship(back_populates="user")
+
+class OTPCode(Base):
+    __tablename__ = "otp_codes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    purpose: Mapped[str] = mapped_column(String(20))  # 'verify' o 'login'
+    challenge_id: Mapped[str] = mapped_column(String(36), index=True, default=lambda: str(uuid.uuid4()))
+    code: Mapped[str] = mapped_column(String(6))
+    expires_at: Mapped["DateTime"] = mapped_column(DateTime, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    consumed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped["DateTime"] = mapped_column(DateTime, server_default=func.now())
+
+    user: Mapped[User] = relationship(back_populates="otps")
