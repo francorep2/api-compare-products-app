@@ -2,12 +2,24 @@
 import os, time, uuid, secrets, datetime as dt
 from passlib.context import CryptContext
 import jwt 
+from datetime import datetime, timezone, timedelta
 
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
 JWT_ALG = "HS256"
 ACCESS_MINUTES = 60
+
+def create_reset_token(user_id: int, email: str, minutes: int = 15) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user_id),
+        "email": email,
+        "scope": "pwd_reset",
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=minutes)).timestamp()),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
 def hash_password(password: str) -> str:
     return pwd_ctx.hash(password)
