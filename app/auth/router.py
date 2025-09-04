@@ -65,44 +65,7 @@ def _create_pending_and_queue_email(
     return challenge
 
 
-def _create_login_otp_and_queue(
-    bg: BackgroundTasks, db: Session, user: User, purpose: str = "login"
-) -> str:
-    """
-    Crea un OTP para login en 2 pasos y envía el correo en background.
-    """
-    code = generate_otp_code()
-    challenge = new_challenge_id()
-    otp = OTPCode(
-        user_id=user.id,
-        purpose=purpose,
-        challenge_id=challenge,
-        code=code,
-        expires_at=minutes_from_now(OTP_TTL_MIN),
-    )
-    db.add(otp)
-    db.commit()
-
-    bg.add_task(send_otp_email, user.email, code, purpose)
-    return challenge
-
-
-def _get_login_challenge(db: Session, challenge_id: str, expected_purpose: str) -> OTPCode:
-    otp = db.query(OTPCode).filter(OTPCode.challenge_id == challenge_id).first()
-    if not otp:
-        raise HTTPException(400, "Challenge inválido o expirado")
-    if otp.purpose != expected_purpose:
-        raise HTTPException(400, "Challenge inválido (propósito incorrecto)")
-    if otp.consumed:
-        raise HTTPException(400, "OTP ya consumido")
-    if otp.expires_at < datetime.utcnow():
-        raise HTTPException(400, "OTP expirado")
-    if otp.attempts >= OTP_MAX_ATTEMPTS:
-        raise HTTPException(429, "Demasiados intentos; solicitá un nuevo código")
-    return otp
-
-
-# ------------------------ Registro ------------------------
+# ------------------------ Registro (con OTP) ------------------------
 
 @router.post("/register/start", response_model=S.RegisterStartOut)
 def register_start(
@@ -204,82 +167,23 @@ def register_resend(
     return {"challenge_id": pending.challenge_id, "message": "Reenviamos el código"}
 
 
-# ------------------------ Login 2 pasos ------------------------
+# ------------------------ Login SIN OTP (token directo) ------------------------
 
-@router.post("/login/start", response_model=S.LoginStartOut)
-def login_start(
-    data: S.LoginStartIn,
-    bg: BackgroundTasks,
+@router.post("/login", response_model=S.TokenOut)
+def login_direct(
+    data: S.LoginStartIn,   # reutilizamos el esquema: {email, password}
     db: Session = Depends(get_db)
 ):
     user = db.query(User).filter(User.email == data.email.lower()).first()
     if not user or not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credenciales inválidas")
+
     if not verify_password(data.password, user.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credenciales inválidas")
 
-    challenge = _create_login_otp_and_queue(bg, db, user, purpose="login")
-    return S.LoginStartOut(
-        challenge_id=challenge,
-        email=user.email,
-        message=f"Te enviamos un código a {_mask(user.email)}"
-    )
-
-
-@router.post("/login/verify", response_model=S.TokenOut)
-def login_verify(
-    data: S.LoginVerifyIn,
-    db: Session = Depends(get_db)
-):
-    otp = _get_login_challenge(db, data.challenge_id, expected_purpose="login")
-    otp.attempts += 1
-    if data.code != otp.code:
-        db.commit()
-        raise HTTPException(400, "Código incorrecto")
-
-    otp.consumed = True
-    db.commit()
-
-    user = db.query(User).filter(User.id == otp.user_id).first()
-    if not user or not user.is_active:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Usuario inválido")
-
+    # Generar token directo
     token = create_access_token(user.id, user.email)
     return S.TokenOut(access_token=token)
-
-
-@router.post("/otp/resend")
-def otp_resend(
-    challenge_id: str,
-    bg: BackgroundTasks,
-    db: Session = Depends(get_db)
-):
-    """
-    Reenvía el OTP de un challenge de login (no de registro).
-    Para registro usar /auth/register/resend.
-    """
-    otp = db.query(OTPCode).filter(OTPCode.challenge_id == challenge_id).first()
-    if not otp:
-        raise HTTPException(400, "Challenge inválido")
-    if otp.consumed:
-        raise HTTPException(400, "OTP ya consumido")
-
-    user = db.query(User).filter(User.id == otp.user_id).first()
-    if not user:
-        raise HTTPException(400, "Usuario inválido")
-
-    # Si expiró, generar uno nuevo
-    if otp.expires_at < datetime.utcnow():
-        new_code = generate_otp_code()
-        new_challenge = new_challenge_id()
-        otp.code = new_code
-        otp.challenge_id = new_challenge
-        otp.expires_at = minutes_from_now(OTP_TTL_MIN)
-
-    # Reenviar
-    bg.add_task(send_otp_email, user.email, otp.code, otp.purpose)
-    db.commit()
-    return {"challenge_id": otp.challenge_id, "message": "Reenviamos el código"}
 
 
 # ------------------------ Perfil ------------------------
