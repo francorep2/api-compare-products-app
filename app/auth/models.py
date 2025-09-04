@@ -1,11 +1,11 @@
 # app/auth/models.py
 from sqlalchemy import String, Integer, Boolean, DateTime, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from app.core.db import Base
+from app.db import Base
 import uuid
 from sqlalchemy import String, Integer, Boolean, DateTime, ForeignKey, func, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from app.core.db import Base
+from app.db import Base
 import uuid
 import datetime as dt
 

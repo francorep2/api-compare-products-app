@@ -1,16 +1,16 @@
-# app/core/db.py
+# app/db.py
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 # Construye el DATABASE_URL desde variables de entorno
 def _pg_url():
-    host = os.getenv("DB_HOST", "localhost")
-    port = os.getenv("DB_PORT", "5432")
-    name = os.getenv("DB_NAME", "groceries")
-    user = os.getenv("DB_USER", "appuser")
-    pwd  = os.getenv("DB_PASS", "super-secret")
-    sslmode = os.getenv("DB_SSLMODE", "disable")  # en prod: require / verify-full
+    host = os.getenv("DB_HOST")
+    port = os.getenv("DB_PORT")
+    name = os.getenv("DB_NAME")
+    user = os.getenv("DB_USER")
+    pwd  = os.getenv("DB_PASS")
+    sslmode = os.getenv("DB_SSLMODE")  
     return f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{name}?sslmode={sslmode}"
 
 DATABASE_URL = os.getenv("DATABASE_URL", _pg_url())

@@ -5,3 +5,8 @@ passlib[bcrypt]
 PyJWT
 playwright
 pydantic[email]
+asyncpg
+python-dotenv
+psycopg2-binary
+certifi==2024.8.30
+python-jose[cryptography]==3.3.0

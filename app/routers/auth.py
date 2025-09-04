@@ -3,8 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException, status, Header, Backgroun
 from sqlalchemy.orm import Session
 from datetime import datetime
 from typing import Optional
-from app.core.db import get_db
-from app.auth import schemas as S
+from app.db import get_db
+from app.schemas import auth as S
 from app.auth.models import User, OTPCode, PendingRegistration
 from app.auth.security import (
     hash_password, verify_password, create_access_token,
@@ -219,7 +219,6 @@ def register_verify(
         db.commit()
         raise HTTPException(400, "Código incorrecto")
 
-    # OK → marcar consumido y crear el usuario real si no existe
     pending.consumed = True
 
     existing = db.query(User).filter(User.email == pending.email).first()

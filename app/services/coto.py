@@ -1,4 +1,3 @@
-# app/services/coto.py
 from typing import List, Dict
 from app.core.browser import browser_manager
 

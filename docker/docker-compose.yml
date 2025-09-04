@@ -1,0 +1,46 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: groceries_pg
+    environment:
+      POSTGRES_DB: groceries
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: super-secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appuser -d groceries"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    image: python:3.12-slim
+    container_name: groceries_api
+    working_dir: /app
+    volumes:
+      - ../:/app          
+    env_file:
+      - ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      /bin/sh -c "
+      apt-get update &&
+      apt-get install -y wget gnupg ca-certificates && 
+      rm -rf /var/lib/apt/lists/* &&
+      python -m pip install --upgrade pip &&
+      pip install -r requirements.txt &&
+      playwright install --with-deps chromium &&       
+      uvicorn app.main:app --host 0.0.0.0 --port 8000
+      "
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:

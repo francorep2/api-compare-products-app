@@ -7,6 +7,7 @@ class SearchItem(BaseModel):
     price: Optional[str] = None
     url: Optional[str] = None
     image_url: Optional[str] = None
+    barcode: Optional[str] = None
 
 class SearchResponse(BaseModel):
     source: str
