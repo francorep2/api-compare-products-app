@@ -6,23 +6,13 @@ import sys, asyncio
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
-from app.core.browser import browser_manager
-from app.models.search_item import SearchItem, SearchResponse
-from app.services.coto import search_coto
-from app.services.dia import search_dia  
-from app.services.carrefour import search_carrefour
+from fastapi import FastAPI
 from starlette.concurrency import run_in_threadpool   
-from app.services.jumbo import search_jumbo  
+from app.core.browser import browser_manager
 from app.routers.auth import router as auth_router
 from app.routers.shopping_list import router as shopping_list
 from app.routers.scrap import router as scrap_router
-from app.db import Base, engine
-import app.models
-import app.models.shopping_list
 from app.db_init import init_tables_sync
-
 
 
 app = FastAPI(title="Groceries Search API", version="1.0.0")
@@ -40,3 +30,7 @@ app.include_router(scrap_router)
 async def on_shutdown():  
     await run_in_threadpool(browser_manager.shutdown)
 
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
