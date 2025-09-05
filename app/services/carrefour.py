@@ -1,9 +1,6 @@
 # app/services/carrefour.py
-from typing import List, Dict
+from typing import List, Dict, Optional
 from app.core.browser import browser_manager
-
-# Importá tu scraper:
-from scrapers.carrefour_scraper import search_top_n as carrefour_search
 
 DEFAULT_CTX = {
     "locale": "es-AR",
@@ -13,6 +10,23 @@ DEFAULT_CTX = {
     "viewport": {"width": 1366, "height": 800},
 }
 
-def search_carrefour(q: str, limit: int = 3) -> List[Dict]:
+# Intento 1: importar 'search' (q o barcode)
+# Intento 2: caer a 'search_top_n' (solo texto)
+try:
+    from scrapers.carrefour_scraper import search as _carrefour_search
+    _HAS_BARCODE_SEARCH = True
+except ImportError:
+    from scrapers.carrefour_scraper import search_top_n as _carrefour_search
+    _HAS_BARCODE_SEARCH = False
+
+
+def search_carrefour(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
+    """
+    - Si el scraper expone `search(ctx, q, barcode, limit)`, lo usa.
+    - Si no, cae a `search_top_n(ctx, q, limit)` ignorando barcode.
+    """
     with browser_manager.new_context(**DEFAULT_CTX) as ctx:
-        return carrefour_search(ctx, q, limit=limit)
+        if _HAS_BARCODE_SEARCH:
+            return _carrefour_search(ctx, q=q, barcode=barcode, limit=limit)
+        # fallback: solo búsqueda por texto
+        return _carrefour_search(ctx, q or "", limit=limit)

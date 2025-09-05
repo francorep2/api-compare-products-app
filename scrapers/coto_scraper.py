@@ -55,6 +55,21 @@ def absolutize(base: str, href: str, current_url: Optional[str] = None) -> str:
     path = href if href.startswith("/") else ("/"+href)
     return f"{parts[0]}//{parts[2]}{path}"
 
+# ---- EAN helpers ----
+def _digits(s: Optional[str]) -> str:
+    import re as _re
+    return _re.sub(r"\D", "", s or "")
+
+def normalize_barcode(s: Optional[str]) -> Optional[str]:
+    d = _digits(s)
+    return d if 8 <= len(d) <= 14 else None  # EAN-8..GTIN-14
+
+def choose_barcode(*cands) -> Optional[str]:
+    for c in cands:
+        d = normalize_barcode(str(c) if c is not None else None)
+        if d: return d
+    return None
+
 # ===================== Parsers comunes =====================
 
 def parse_jsonld_product(page):
@@ -78,10 +93,13 @@ def parse_jsonld_product(page):
                     image = it.get("image")
                     if isinstance(image, list) and image:
                         image = image[0]
+                    # Algunos PDP de Coto incluyen gtin/sku
+                    gtin = choose_barcode(it.get("gtin13"), it.get("gtin14"), it.get("gtin"), it.get("sku"))
                     return {
                         "title": clean_text(name) if name else None,
                         "price": f"ARS {price:.2f}" if price is not None else None,
-                        "image": image or None
+                        "image": image or None,
+                        "barcode": gtin or None,
                     }
         except: pass
     return None
@@ -191,6 +209,52 @@ def extract_image_url(page, final_url) -> Optional[str]:
                     return absolutize(COTO_BASE, src)
     return None
 
+# ===================== EAN extractors Coto =====================
+
+def extract_barcode_from_datalayer_or_html(page) -> Optional[str]:
+    # 1) dataLayer (si existiera)
+    try:
+        has_dl = page.evaluate("() => Array.isArray(window.dataLayer)")
+        if has_dl:
+            arr = page.evaluate("() => window.dataLayer")
+            for it in arr:
+                if isinstance(it, dict):
+                    for k in ("ean","gtin","gtin13","productEAN","productGtin","codigoBarras","barcode"):
+                        val = it.get(k)
+                        d = normalize_barcode(val if val is not None else None)
+                        if d: return d
+    except: pass
+    # 2) JSON-LD crudo extra (por si parse_jsonld_product no lo detectó)
+    try:
+        html = page.content()
+        for raw in re.findall(r'<script[^>]+ld\+json[^>]*>(.*?)</script>', html, flags=re.S|re.I):
+            try: data = json.loads(raw)
+            except: continue
+            stack = [data]
+            while stack:
+                it = stack.pop()
+                if isinstance(it, dict):
+                    t = it.get("@type")
+                    if "Product" in (t if isinstance(t, str) else str(t)):
+                        bc = choose_barcode(it.get("gtin13"), it.get("gtin14"), it.get("gtin"), it.get("sku"))
+                        if bc: return bc
+                    stack.extend(it.values())
+                elif isinstance(it, list):
+                    stack.extend(it)
+    except: pass
+    # 3) Regex sobre el HTML (buscar números 8-14 dígitos, priorizar 13/14)
+    try:
+        txt = page.content()
+        nums = re.findall(r'\b(\d{8,14})\b', txt)
+        # Heurística: preferir 13/14, luego 12, luego 8
+        for pref in (14, 13, 12, 8):
+            for n in nums:
+                if len(n) == pref:
+                    d = normalize_barcode(n)
+                    if d: return d
+    except: pass
+    return None
+
 # ===================== Coto PDP/Search =====================
 
 def sanitize_coto_href(href:str) -> str:
@@ -223,6 +287,7 @@ def fetch_coto_pdp(ctx, href, timeout=60000) -> Dict:
         page.goto(url, wait_until="networkidle", timeout=timeout)
         for _ in range(2): page.mouse.wheel(0, 800); time.sleep(0.2)
 
+        # título
         title = None
         for sel in ["h1[itemprop='name']", "h1.product-name", "h1", ".product-name"]:
             el = page.locator(sel).first
@@ -230,6 +295,7 @@ def fetch_coto_pdp(ctx, href, timeout=60000) -> Dict:
                 t = clean_text(el.inner_text())
                 if t and len(t)>2: title = t; break
 
+        # precio (JSON-LD -> metas -> DOM -> regex)
         price = None
         jl = parse_jsonld_product(page)
         if jl:
@@ -239,13 +305,21 @@ def fetch_coto_pdp(ctx, href, timeout=60000) -> Dict:
         if not price: price = parse_regex_from_html(page)
         if not title: title = clean_text(page.title())
 
+        # imagen
         image_url = extract_image_url(page, url)
 
-        return {"title": title, "price": price, "url": url, "image_url": image_url}
+        # barcode
+        barcode = None
+        if jl and jl.get("barcode"):
+            barcode = jl["barcode"]
+        if not barcode:
+            barcode = extract_barcode_from_datalayer_or_html(page)
+
+        return {"title": title, "price": price, "url": url, "image_url": image_url, "barcode": barcode}
     except Exception as e:
         print("[LOG] PDP error Coto:", e)
         save_debug_html(page, "coto_pdp_error")
-        return {"title": None, "price": None, "url": href, "image_url": None}
+        return {"title": None, "price": None, "url": href, "image_url": None, "barcode": None}
     finally:
         page.close()
 
@@ -282,6 +356,33 @@ def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
     finally:
         page.close()
 
+# ===================== Búsqueda por barcode en Coto =====================
+
+def coto_search_by_barcode(ctx, ean: str, limit: int = TOP_N) -> List[Dict]:
+    """
+    Coto no expone API VTEX de búsqueda por EAN. Estrategia:
+    - Buscar por texto usando el EAN.
+    - Visitar PDPs y filtrar aquellos cuyo barcode extraído coincida con el EAN.
+    """
+    prelim = coto_search_top_n(ctx, ean, limit=limit*4)  # traer más para filtrar
+    out = []
+    for item in prelim:
+        bc = item.get("barcode")
+        if bc and bc == ean:
+            out.append(item)
+        if len(out) == limit:
+            break
+    # Si ninguno devolvió barcode, devolvemos hasta limit igualmente (mejor que vacío)
+    return out or prelim[:limit]
+
 # API pública del scraper
 def search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
     return coto_search_top_n(ctx, query, limit=limit)
+
+def search(ctx, q: Optional[str] = None, barcode: Optional[str] = None, limit: int = TOP_N) -> List[Dict]:
+    ean = normalize_barcode(barcode or (q or ""))
+    if ean and (not q or q.strip() == ean):
+        return coto_search_by_barcode(ctx, ean, limit=limit)
+    if q and q.strip():
+        return coto_search_top_n(ctx, q.strip(), limit=limit)
+    return []

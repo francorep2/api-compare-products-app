@@ -1,12 +1,12 @@
 # scrapers/carrefour_scraper.py
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import json, urllib.parse, re, time, datetime, os
-from urllib.parse import urlparse
+from urllib.parse import urljoin
 
 TOP_N = 3
 CARREFOUR_BASE = "https://www.carrefour.com.ar"
 
-# ===================== Utils comunes =====================
+# ===================== Utils =====================
 
 def clean_text(s: Optional[str]) -> Optional[str]:
     if not s: return None
@@ -53,7 +53,22 @@ def absolutize(base: str, href: str, current_url: Optional[str] = None) -> str:
     path = href if href.startswith("/") else ("/"+href)
     return f"{parts[0]}//{parts[2]}{path}"
 
-# ===================== Parsers comunes =====================
+# ---- EAN helpers ----
+def _digits(s: Optional[str]) -> str:
+    import re as _re
+    return _re.sub(r"\D", "", s or "")
+
+def normalize_barcode(s: Optional[str]) -> Optional[str]:
+    d = _digits(s)
+    return d if 8 <= len(d) <= 14 else None  # EAN-8 a GTIN-14
+
+def choose_barcode(*cands) -> Optional[str]:
+    for c in cands:
+        d = normalize_barcode(str(c) if c is not None else None)
+        if d: return d
+    return None
+
+# ===================== Parsers base =====================
 
 def parse_jsonld_product(page):
     scripts = page.locator("script[type='application/ld+json']")
@@ -76,10 +91,16 @@ def parse_jsonld_product(page):
                     image = it.get("image")
                     if isinstance(image, list) and image:
                         image = image[0]
+                    gtin = choose_barcode(
+                        it.get("gtin13"), it.get("gtin14"),
+                        it.get("gtin12"), it.get("gtin8"),
+                        it.get("gtin"), it.get("sku")
+                    )
                     return {
                         "title": clean_text(name) if name else None,
                         "price": f"ARS {price:.2f}" if price is not None else None,
-                        "image": image or None
+                        "image": image or None,
+                        "barcode": gtin or None,
                     }
         except: pass
     return None
@@ -219,7 +240,7 @@ def _carrefour_extract_from_state(page) -> List[str]:
         return []
 
 def _carrefour_parse_pdp_from_state(page) -> Dict:
-    """Extrae title/price/image desde window.__STATE__ en PDP."""
+    """title/price/image desde window.__STATE__ (no EAN)."""
     try:
         st = page.evaluate("() => window.__STATE__ || null")
         if not isinstance(st, dict): return {}
@@ -259,10 +280,8 @@ def _carrefour_parse_pdp_from_state(page) -> Dict:
         price = None
         if prices:
             mx = max(prices)
-            if mx >= 1000:
-                price = f"ARS {mx/100:.2f}"
-            elif mx >= 100:
-                price = f"ARS {mx:.2f}"
+            if mx >= 1000: price = f"ARS {mx/100:.2f}"
+            elif mx >= 100: price = f"ARS {mx:.2f}"
 
         out = {}
         if title: out["title"] = title
@@ -288,7 +307,102 @@ def wait_quick(locator, timeout=2500) -> bool:
         locator.wait_for(timeout=timeout); return True
     except: return False
 
-# ===================== Carrefour PDP/Search =====================
+# ===================== EAN extractors (potenciados) =====================
+
+def _deep_find_ean(obj: Any) -> Optional[str]:
+    """Recorre dict/list recursivamente buscando ean/gtin/referenceId."""
+    try:
+        if isinstance(obj, dict):
+            # Si viene array referenceId con pares Key/Value
+            if "referenceId" in obj and isinstance(obj["referenceId"], list):
+                for ref in obj["referenceId"]:
+                    if isinstance(ref, dict):
+                        k = (ref.get("Key") or ref.get("key") or "").lower()
+                        v = ref.get("Value") or ref.get("value")
+                        if k in ("ean","gtin","gtin13","codigo","código"):
+                            bc = choose_barcode(v)
+                            if bc: return bc
+            # Claves directas típicas
+            for k in ("ean","Ean","gtin","gtin13","gtin14","gtin12","gtin8","barCode","barcode","CodigoBarras","CódigoBarras"):
+                if k in obj:
+                    bc = choose_barcode(obj.get(k))
+                    if bc: return bc
+            # Continuar recursión
+            for v in obj.values():
+                bc = _deep_find_ean(v)
+                if bc: return bc
+        elif isinstance(obj, list):
+            for it in obj:
+                bc = _deep_find_ean(it)
+                if bc: return bc
+    except:
+        pass
+    return None
+
+def extract_ean_from_window(page) -> Optional[str]:
+    # skuJson
+    try:
+        has = page.evaluate("() => typeof window.skuJson !== 'undefined'")
+        if has:
+            data = page.evaluate("() => window.skuJson")
+            bc = _deep_find_ean(data)
+            if bc: return bc
+    except: pass
+    return None
+
+def extract_ean_from_state_or_datalayer(page) -> Optional[str]:
+    # dataLayer
+    try:
+        has_dl = page.evaluate("() => Array.isArray(window.dataLayer)")
+        if has_dl:
+            arr = page.evaluate("() => window.dataLayer")
+            bc = _deep_find_ean(arr)
+            if bc: return bc
+    except: pass
+    # __STATE__
+    try:
+        has_state = page.evaluate("() => typeof window.__STATE__ !== 'undefined'")
+        if has_state:
+            st = page.evaluate("() => window.__STATE__")
+            bc = _deep_find_ean(st)
+            if bc: return bc
+            # fallback regex sobre el dump
+            txt = json.dumps(st, ensure_ascii=False)
+            m = re.search(r'"ean"\s*:\s*"([^"]+)"', txt, flags=re.I)
+            if m:
+                bc = choose_barcode(m.group(1))
+                if bc: return bc
+    except: pass
+    return None
+
+def extract_ean_from_meta_or_dom(page) -> Optional[str]:
+    # metas/microdata
+    for sel in [
+        "meta[itemprop='gtin13']",
+        "meta[itemprop='gtin14']",
+        "meta[itemprop='gtin12']",
+        "meta[itemprop='gtin8']",
+        "meta[itemprop='sku']",
+        "meta[name='gtin']",
+    ]:
+        try:
+            el = page.locator(sel).first
+            if el.count():
+                v = el.get_attribute("content")
+                bc = choose_barcode(v)
+                if bc: return bc
+        except: pass
+    # Tabla de especificaciones (texto)
+    try:
+        # Busca cualquier nodo que contenga EAN/GTIN/Código de barras y toma el número cercano
+        txt = page.inner_text("body")
+        m = re.search(r"(EAN|GTIN|Código\s*de\s*barras)\D{0,30}(\d{8,14})", txt, flags=re.I)
+        if m:
+            return normalize_barcode(m.group(2))
+    except: pass
+    return None
+
+# ===================== PDP/Search =====================
 
 def fetch_carrefour_pdp(ctx, href, timeout=60000) -> Dict:
     page = ctx.new_page()
@@ -304,7 +418,7 @@ def fetch_carrefour_pdp(ctx, href, timeout=60000) -> Dict:
             if time.monotonic() - start > MAX_TOTAL: break
             page.mouse.wheel(0, 1000); time.sleep(0.2)
 
-        # Quick title
+        # Title
         title = None
         for sel in ["h1[data-testid='product-name']","h1[itemprop='name']",
                     ".vtex-store-components-3-x-productNameContainer h1","h1"]:
@@ -313,6 +427,7 @@ def fetch_carrefour_pdp(ctx, href, timeout=60000) -> Dict:
                 if t and len(t) > 2:
                     title = t; break
 
+        # Price
         price = None
         jl = parse_jsonld_product(page)
         if jl:
@@ -321,7 +436,6 @@ def fetch_carrefour_pdp(ctx, href, timeout=60000) -> Dict:
                 pnum = float((jl.get("price") or "").replace(",", "."))
                 if pnum >= 100: price = f"ARS {pnum:.2f}"
             except: pass
-
         if not price:
             p2 = parse_meta_price_dom(page)
             try:
@@ -330,6 +444,7 @@ def fetch_carrefour_pdp(ctx, href, timeout=60000) -> Dict:
                     if v >= 100: price = p2
             except: pass
 
+        # Image
         if not title or not price:
             state_data = _carrefour_parse_pdp_from_state(page)
             if state_data.get("title") and not title: title = state_data["title"]
@@ -337,15 +452,25 @@ def fetch_carrefour_pdp(ctx, href, timeout=60000) -> Dict:
             image_url = state_data.get("image_url")
         else:
             image_url = extract_image_carrefour(page)
-
         if not title: title = clean_text(page.title())
         if not image_url: image_url = extract_image_carrefour(page)
 
-        return {"title": title, "price": price, "url": url, "image_url": image_url}
+        # ---- BARCODE (EAN/GTIN) súper reforzado ----
+        barcode = None
+        if jl and jl.get("barcode"):
+            barcode = jl["barcode"]
+        if not barcode:
+            barcode = extract_ean_from_window(page)
+        if not barcode:
+            barcode = extract_ean_from_state_or_datalayer(page)
+        if not barcode:
+            barcode = extract_ean_from_meta_or_dom(page)
+
+        return {"title": title, "price": price, "url": url, "image_url": image_url, "barcode": barcode}
     except Exception as e:
         print("[LOG] PDP error Carrefour:", e)
         save_debug_html(page, "carrefour_pdp_error")
-        return {"title": None, "price": None, "url": href, "image_url": None}
+        return {"title": None, "price": None, "url": href, "image_url": None, "barcode": None}
     finally:
         page.close()
 
@@ -361,8 +486,6 @@ def carrefour_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
         for search_url in urls_try:
             print(f"[LOG] Carrefour search GET {search_url}")
             safe_goto(page, search_url, wait="domcontentloaded", timeout=15000)
-            print(f"[LOG] Search title: {page.title()}")
-
             _carrefour_accept_cookies(page)
 
             t0 = time.monotonic()
@@ -406,10 +529,67 @@ def carrefour_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
     finally:
         page.close()
 
-# API pública del scraper
+# ====== VTEX: búsqueda directa por EAN ======
+
+def _vtex_search_by_barcode(ctx, ean: str, limit: int = 3) -> List[Dict]:
+    api_url = f"{CARREFOUR_BASE}/api/catalog_system/pub/products/search/?fq=alternateIds_Ean:{ean}"
+    page = ctx.new_page()
+    try:
+        resp = page.goto(api_url, wait_until="domcontentloaded", timeout=20000)
+        if not resp or resp.status != 200:
+            return []
+        data = resp.json()
+        if not isinstance(data, list):
+            return []
+        out: List[Dict] = []
+        for prod in data[:limit]:
+            title = (prod.get("productName") or "").strip() or None
+            link = prod.get("link") or prod.get("linkText")
+            if link:
+                if not str(link).startswith("http"):
+                    url = urljoin(CARREFOUR_BASE + "/", f"{link}/p")
+                else:
+                    url = link if link.endswith("/p") else (link.rstrip("/") + "/p")
+            else:
+                url = None
+            image_url, bc = None, None
+            items = prod.get("items") or []
+            if items:
+                it0 = items[0]
+                # EAN directo o en referenceId
+                bc = choose_barcode(it0.get("ean"))
+                if not bc and isinstance(it0.get("referenceId"), list):
+                    for ref in it0["referenceId"]:
+                        if isinstance(ref, dict):
+                            k = (ref.get("Key") or "").lower()
+                            if k in ("ean","gtin","gtin13"):
+                                bc = choose_barcode(ref.get("Value"))
+                                if bc: break
+                imgs = it0.get("images") or []
+                if imgs:
+                    image_url = imgs[0].get("imageUrl") or imgs[0].get("imageUrlHttps")
+            out.append({
+                "title": title,
+                "price": None,
+                "url": url,
+                "image_url": image_url,
+                "barcode": bc or ean,
+            })
+        return out
+    except Exception:
+        return []
+    finally:
+        page.close()
+
+# ===================== API pública =====================
+
 def search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
-    """
-    ctx: Browser context provisto por app/services/carrefour.py
-    """
-    # Nota: el enrutado/abort de trackers lo podés hacer en el servicio (context.route)
     return carrefour_search_top_n(ctx, query, limit=limit)
+
+def search(ctx, q: Optional[str] = None, barcode: Optional[str] = None, limit: int = TOP_N) -> List[Dict]:
+    ean = normalize_barcode(barcode or (q or ""))
+    if ean:
+        return _vtex_search_by_barcode(ctx, ean, limit=limit)
+    if q and q.strip():
+        return carrefour_search_top_n(ctx, q.strip(), limit=limit)
+    return []

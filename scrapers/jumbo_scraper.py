@@ -1,11 +1,12 @@
 # scrapers/jumbo_scraper.py
 from typing import List, Dict, Optional
 import json, urllib.parse, re, time, datetime, os
+from urllib.parse import urljoin
 
 TOP_N = 3
 JUMBO_BASE = "https://www.jumbo.com.ar"
 
-# ===================== Utils comunes =====================
+# ===================== Utils =====================
 
 def clean_text(s: Optional[str]) -> Optional[str]:
     if not s: return None
@@ -52,7 +53,17 @@ def absolutize(base: str, href: str, current_url: Optional[str] = None) -> str:
     path = href if href.startswith("/") else ("/"+href)
     return f"{parts[0]}//{parts[2]}{path}"
 
-# ===================== Parsers comunes =====================
+# ---- EAN helpers ----
+def _digits(s: Optional[str]) -> str: return re.sub(r"\D", "", s or "")
+def normalize_barcode(s: Optional[str]) -> Optional[str]:
+    d = _digits(s); return d if 8 <= len(d) <= 14 else None
+def choose_barcode(*cands) -> Optional[str]:
+    for c in cands:
+        d = normalize_barcode(str(c) if c is not None else None)
+        if d: return d
+    return None
+
+# ===================== Parsers =====================
 
 def parse_jsonld_product(page):
     scripts = page.locator("script[type='application/ld+json']")
@@ -75,10 +86,12 @@ def parse_jsonld_product(page):
                     image = it.get("image")
                     if isinstance(image, list) and image:
                         image = image[0]
+                    gtin = choose_barcode(it.get("gtin13"), it.get("gtin14"), it.get("gtin"), it.get("sku"))
                     return {
                         "title": clean_text(name) if name else None,
                         "price": f"ARS {price:.2f}" if price is not None else None,
-                        "image": image or None
+                        "image": image or None,
+                        "barcode": gtin or None,
                     }
         except: pass
     return None
@@ -131,34 +144,50 @@ def parse_regex_from_html(page) -> Optional[str]:
                 best = (val, pr)
     return best[1] if best else None
 
-# ===================== Jumbo helpers (VTEX) =====================
+# === EAN extractors (VTEX) ===
 
-def sanitize_jumbo_href(href: str) -> str:
-    if not href: return JUMBO_BASE
-    href = urllib.parse.unquote(href.split("#", 1)[0]).strip()
-    return absolutize(JUMBO_BASE, href)
-
-def extract_image_jumbo(page) -> Optional[str]:
+def extract_ean_from_window(page) -> Optional[str]:
     try:
-        jl = parse_jsonld_product(page)
-        if jl and jl.get("image"):
-            return absolutize(JUMBO_BASE, jl["image"])
+        has = page.evaluate("() => typeof window.skuJson !== 'undefined'")
+        if not has: return None
+        data = page.evaluate("() => window.skuJson")
+        if isinstance(data, dict):
+            for s in (data.get("skus") or []):
+                bc = choose_barcode(s.get("ean") or s.get("Ean"))
+                if bc: return bc
+            bc = choose_barcode(data.get("ean") or data.get("Ean"))
+            if bc: return bc
     except: pass
-    for sel in ["meta[property='og:image']","meta[property='og:image:url']","meta[name='twitter:image']","link[rel='image_src']"]:
-        el = page.locator(sel).first
-        if el.count():
-            src = el.get_attribute("content") or el.get_attribute("href")
-            if src: return absolutize(JUMBO_BASE, src)
-    for sel in ["img[itemprop='image']", ".vtex-store-components-3-x-productImageTag", ".product-image img", "img"]:
-        el = page.locator(sel).first
-        if el.count():
-            for attr in ["src","data-src","data-lazy","data-original"]:
-                src = el.get_attribute(attr)
-                if src: return absolutize(JUMBO_BASE, src)
     return None
 
+def extract_ean_from_state_or_datalayer(page) -> Optional[str]:
+    # dataLayer
+    try:
+        has_dl = page.evaluate("() => Array.isArray(window.dataLayer)")
+        if has_dl:
+            arr = page.evaluate("() => window.dataLayer")
+            for it in arr:
+                if isinstance(it, dict):
+                    for k in ("ean","gtin","gtin13","productEAN","productGtin"):
+                        bc = choose_barcode(it.get(k))
+                        if bc: return bc
+    except: pass
+    # __STATE__
+    try:
+        has_state = page.evaluate("() => typeof window.__STATE__ !== 'undefined'")
+        if has_state:
+            st = page.evaluate("() => window.__STATE__")
+            txt = json.dumps(st, ensure_ascii=False)
+            m = re.search(r'"ean"\s*:\s*"([^"]+)"', txt)
+            if m:
+                bc = choose_barcode(m.group(1))
+                if bc: return bc
+    except: pass
+    return None
+
+# ===================== Helpers búsqueda =====================
+
 def _jumbo_accept_cookies(page):
-    # OneTrust
     for bid in ["onetrust-accept-btn-handler", "onetrust-accept-btn-handler-2"]:
         try:
             el = page.locator(f"#{bid}")
@@ -173,14 +202,11 @@ def _jumbo_accept_cookies(page):
 def _jumbo_is_pdp_href(href: str) -> bool:
     if not href: return False
     href = href.lower()
-    if not href.endswith("/p"): return False
-    bad = ["/checkout","/account","/promociones","/ofertas","/landing"]
-    return not any(b in href for b in bad)
+    return href.endswith("/p") and ("/checkout" not in href and "/account" not in href)
 
 def _jumbo_collect_anchors(page):
     for sel in [
         "a[href$='/p']",
-        "a[href*='/p?']",
         ".vtex-product-summary-2-x-clearLink",
         ".vtex-search-result-3-x-gallery a[href*='/p']",
         "section [data-testid='product-summary'] a[href*='/p']",
@@ -192,85 +218,6 @@ def _jumbo_collect_anchors(page):
                 return loc
         except: pass
     return None
-
-def _jumbo_extract_links_from_state(page) -> List[str]:
-    try:
-        state = page.evaluate("() => window.__STATE__ || null")
-        if not isinstance(state, dict): return []
-        base = JUMBO_BASE
-        links, seen = [], set()
-        for v in state.values():
-            if isinstance(v, dict):
-                lt = v.get("linkText")
-                if lt:
-                    href = f"{base}/{lt}/p"
-                    if href not in seen and _jumbo_is_pdp_href(href):
-                        seen.add(href); links.append(href)
-            elif isinstance(v, list):
-                for it in v:
-                    if isinstance(it, dict):
-                        lt = it.get("linkText")
-                        if lt:
-                            href = f"{base}/{lt}/p"
-                            if href not in seen and _jumbo_is_pdp_href(href):
-                                seen.add(href); links.append(href)
-        return links
-    except:
-        return []
-
-def _jumbo_parse_pdp_from_state(page) -> Dict:
-    """Extrae title/price/image desde window.__STATE__ en PDP."""
-    try:
-        st = page.evaluate("() => window.__STATE__ || null")
-        if not isinstance(st, dict): return {}
-        title, image_url = None, None
-        prices = []
-
-        def _push_price(val):
-            try:
-                f = float(val)
-                if f > 0:
-                    prices.append(f)
-            except: pass
-
-        for v in st.values():
-            if isinstance(v, dict):
-                cand_title = v.get("productName") or v.get("name") or v.get("productTitle")
-                if not title and isinstance(cand_title, str) and len(cand_title.strip()) > 2:
-                    title = clean_text(cand_title)
-                pr = v.get("priceRange") or {}
-                sp = (pr.get("sellingPrice") or {})
-                _push_price(sp.get("highPrice")); _push_price(sp.get("lowPrice"))
-                items = v.get("items") or v.get("Item") or []
-                if isinstance(items, dict): items = [items]
-                for it in items:
-                    imgs = it.get("images") or it.get("Images") or []
-                    if not image_url and isinstance(imgs, list) and imgs:
-                        iu = imgs[0].get("imageUrl") or imgs[0].get("url")
-                        if isinstance(iu, str):
-                            if iu.startswith("//"): iu = "https:" + iu
-                            image_url = absolutize(JUMBO_BASE, iu)
-                    sellers = it.get("sellers") or it.get("Sellers") or []
-                    for s in sellers:
-                        co = s.get("commertialOffer") or s.get("CommertialOffer") or {}
-                        for key in ["Price","ListPrice","spotPrice","SellingPrice","price"]:
-                            if key in co: _push_price(co[key])
-
-        price = None
-        if prices:
-            mx = max(prices)
-            if mx >= 1000:      # centavos
-                price = f"ARS {mx/100:.2f}"
-            elif mx >= 100:     # ARS directo
-                price = f"ARS {mx:.2f}"
-
-        out = {}
-        if title: out["title"] = title
-        if price: out["price"] = price
-        if image_url: out["image_url"] = image_url
-        return out
-    except:
-        return {}
 
 def safe_goto(page, url, wait="domcontentloaded", timeout=20000):
     try:
@@ -288,23 +235,19 @@ def wait_quick(locator, timeout=2500) -> bool:
         locator.wait_for(timeout=timeout); return True
     except: return False
 
-# ===================== Jumbo PDP/Search =====================
+# ===================== PDP & Search =====================
 
 def fetch_jumbo_pdp(ctx, href, timeout=60000) -> Dict:
     page = ctx.new_page()
-    start = time.monotonic()
-    MAX_TOTAL = 12.0
     try:
-        url = sanitize_jumbo_href(href)
+        url = absolutize(JUMBO_BASE, href)
         print(f"[LOG] JUMBO PDP GET {url}")
         safe_goto(page, url, wait="domcontentloaded", timeout=15000)
         _jumbo_accept_cookies(page)
 
         for _ in range(3):
-            if time.monotonic() - start > MAX_TOTAL: break
             page.mouse.wheel(0, 1000); time.sleep(0.2)
 
-        # Título rápido
         title = None
         for sel in ["h1[data-testid='product-name']","h1[itemprop='name']",
                     ".vtex-store-components-3-x-productNameContainer h1","h1"]:
@@ -325,27 +268,32 @@ def fetch_jumbo_pdp(ctx, href, timeout=60000) -> Dict:
         if not price:
             p2 = parse_meta_price_dom(page)
             try:
-                if p2:
-                    v = float(p2.replace("ARS","").strip())
-                    if v >= 100: price = p2
+                if p2 and float(p2.replace("ARS","").strip()) >= 100:
+                    price = p2
             except: pass
 
-        if not title or not price:
-            state_data = _jumbo_parse_pdp_from_state(page)
-            if state_data.get("title") and not title: title = state_data["title"]
-            if state_data.get("price"): price = state_data["price"]
-            image_url = state_data.get("image_url")
-        else:
-            image_url = extract_image_jumbo(page)
+        image_url = None
+        if jl and jl.get("image"): image_url = absolutize(JUMBO_BASE, jl["image"])
+        if not image_url:
+            for sel in ["meta[property='og:image']","meta[property='og:image:url']","meta[name='twitter:image']","link[rel='image_src']"]:
+                el = page.locator(sel).first
+                if el.count():
+                    src = el.get_attribute("content") or el.get_attribute("href")
+                    if src: image_url = absolutize(JUMBO_BASE, src); break
 
         if not title: title = clean_text(page.title())
-        if not image_url: image_url = extract_image_jumbo(page)
 
-        return {"title": title, "price": price, "url": url, "image_url": image_url}
+        # ---- BARCODE ----
+        barcode = None
+        if jl and jl.get("barcode"): barcode = jl["barcode"]
+        if not barcode: barcode = extract_ean_from_window(page)
+        if not barcode: barcode = extract_ean_from_state_or_datalayer(page)
+
+        return {"title": title, "price": price, "url": url, "image_url": image_url, "barcode": barcode}
     except Exception as e:
-        print("[LOG] PDP error Jumbo:", e)
+        print("[LOG] JUMBO PDP error:", e)
         save_debug_html(page, "jumbo_pdp_error")
-        return {"title": None, "price": None, "url": href, "image_url": None}
+        return {"title": None, "price": None, "url": href, "image_url": None, "barcode": None}
     finally:
         page.close()
 
@@ -361,17 +309,14 @@ def jumbo_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
         for search_url in urls_try:
             print(f"[LOG] JUMBO search GET {search_url}")
             safe_goto(page, search_url, wait="domcontentloaded", timeout=15000)
-            print(f"[LOG] JUMBO search title: {page.title()}")
-
             _jumbo_accept_cookies(page)
-
             t0 = time.monotonic()
             while time.monotonic() - t0 < 6.0:
                 page.mouse.wheel(0, 1000); time.sleep(0.2)
 
             anchors = _jumbo_collect_anchors(page)
             total = anchors.count() if anchors else 0
-            print(f"[LOG] JUMBO anchors visibles: {total}")
+            print(f"[LOG] JUMBO anchors: {total}")
 
             if total:
                 for i in range(min(total, limit * 10)):
@@ -383,21 +328,8 @@ def jumbo_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
                     seen.add(pdp["url"]); results.append(pdp)
                     if len(results) == limit: return results
 
-            if len(results) < limit:
-                state_links = _jumbo_extract_links_from_state(page)
-                print(f"[LOG] JUMBO STATE links: {len(state_links)}")
-                for href in state_links:
-                    if len(results) == limit: break
-                    if href in seen: continue
-                    pdp = fetch_jumbo_pdp(ctx, href)
-                    if not pdp["url"] or pdp["url"] in seen: continue
-                    seen.add(pdp["url"]); results.append(pdp)
-
-            if results:
-                return results[:limit]
-
         if not results:
-            save_debug_html(page, "jumbo_search_empty_all")
+            save_debug_html(page, "jumbo_search_empty")
         return results[:limit]
     except Exception as e:
         print("[LOG] JUMBO search error:", e)
@@ -406,6 +338,54 @@ def jumbo_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
     finally:
         page.close()
 
-# API pública del scraper
+# ====== VTEX: búsqueda por EAN ======
+
+def _vtex_search_by_barcode(ctx, ean: str, limit: int = 3) -> List[Dict]:
+    api_url = f"{JUMBO_BASE}/api/catalog_system/pub/products/search/?fq=alternateIds_Ean:{ean}"
+    page = ctx.new_page()
+    try:
+        resp = page.goto(api_url, wait_until="domcontentloaded", timeout=20000)
+        if not resp or resp.status != 200:
+            return []
+        data = resp.json()
+        if not isinstance(data, list):
+            return []
+        out: List[Dict] = []
+        for prod in data[:limit]:
+            title = (prod.get("productName") or "").strip() or None
+            link = prod.get("link") or prod.get("linkText")
+            if link:
+                if not str(link).startswith("http"):
+                    url = urljoin(JUMBO_BASE + "/", f"{link}/p")
+                else:
+                    url = link if link.endswith("/p") else (link.rstrip("/") + "/p")
+            else:
+                url = None
+            image_url, bc = None, None
+            items = prod.get("items") or []
+            if items:
+                it0 = items[0]
+                bc = (it0.get("ean") or "").strip() or None
+                imgs = it0.get("images") or []
+                if imgs:
+                    image_url = imgs[0].get("imageUrl") or imgs[0].get("imageUrlHttps")
+            out.append({
+                "title": title, "price": None, "url": url,
+                "image_url": image_url, "barcode": bc or ean
+            })
+        return out
+    except Exception:
+        return []
+    finally:
+        page.close()
+
+# ===================== API pública =====================
+
 def search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
     return jumbo_search_top_n(ctx, query, limit=limit)
+
+def search(ctx, q: Optional[str] = None, barcode: Optional[str] = None, limit: int = TOP_N) -> List[Dict]:
+    ean = normalize_barcode(barcode or (q or ""))
+    if ean: return _vtex_search_by_barcode(ctx, ean, limit=limit)
+    if q and q.strip(): return jumbo_search_top_n(ctx, q.strip(), limit=limit)
+    return []
