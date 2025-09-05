@@ -15,13 +15,13 @@ from app.services.dia import search_dia
 from app.services.carrefour import search_carrefour
 from starlette.concurrency import run_in_threadpool   
 from app.services.jumbo import search_jumbo  
-from app.db import Base, engine
 from app.routers.auth import router as auth_router
 from app.routers.shopping_list import router as shopping_list
 from app.routers.scrap import router as scrap_router
 from app.db import Base, engine
 import app.models
 import app.models.shopping_list
+from app.db_init import init_tables_sync
 
 
 
@@ -30,13 +30,7 @@ app = FastAPI(title="Groceries Search API", version="1.0.0")
 @app.on_event("startup")
 async def on_startup():  
     await run_in_threadpool(browser_manager.startup, True)
-    print(">> Creating tables if not exist…")
-    Base.metadata.create_all(bind=engine)
-    with engine.connect() as conn:
-        exists = conn.exec_driver_sql(
-            "select count(*) from information_schema.tables where table_name in ('shopping_list','shopping_item')"
-        ).scalar()
-        print(f">> Tables present count: {exists}")  # Debe ser 2
+    init_tables_sync()
 
 app.include_router(auth_router)
 app.include_router(shopping_list)
