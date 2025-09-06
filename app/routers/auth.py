@@ -1,7 +1,7 @@
 # app/auth/router.py
 from fastapi import APIRouter, Depends, HTTPException, status, Header, BackgroundTasks
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from app.db import get_db
 from app.schemas import auth as S
@@ -207,7 +207,7 @@ def register_verify(
         raise HTTPException(400, "Challenge inválido o expirado")
     if pending.consumed:
         raise HTTPException(400, "OTP ya consumido")
-    if pending.expires_at < datetime.utcnow():
+    if pending.expires_at <= datetime.now(timezone.utc):
         raise HTTPException(400, "OTP expirado")
 
     pending.attempts += 1
@@ -259,7 +259,7 @@ def register_resend(
         raise HTTPException(400, "Challenge inválido")
 
     # Si expiró, regenerar
-    if pending.expires_at < datetime.utcnow():
+    if pending.expires_at <= datetime.now(timezone.utc):
         pending.code = generate_otp_code()
         pending.expires_at = minutes_from_now(OTP_TTL_MIN)
 
