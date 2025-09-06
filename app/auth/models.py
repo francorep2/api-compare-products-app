@@ -11,7 +11,7 @@ import datetime as dt
 
 class PendingRegistration(Base):
     __tablename__ = "pending_registrations"
-    __table_args__ = (
+    __table_args__ = (    
         UniqueConstraint("email", name="uq_pending_reg_email"),
         UniqueConstraint("challenge_id", name="uq_pending_reg_challenge"),
     )
@@ -25,6 +25,8 @@ class PendingRegistration(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     consumed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped["DateTime"] = mapped_column(DateTime, server_default=func.now())
+    first_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    last_name: Mapped[str] = mapped_column(String(100), nullable=False)
 
 class User(Base):
     __tablename__ = "users"
@@ -34,6 +36,8 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped["DateTime"] = mapped_column(DateTime, server_default=func.now())
+    first_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    last_name: Mapped[str] = mapped_column(String(100), nullable=False)
 
     otps: Mapped[list["OTPCode"]] = relationship(back_populates="user")
 

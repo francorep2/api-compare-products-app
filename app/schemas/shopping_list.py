@@ -1,6 +1,8 @@
-# app/schemas/shopping.py
-from pydantic import BaseModel, Field
-from datetime import datetime
+# app/schemas/shopping_list.py
+from typing import Optional
+from pydantic import BaseModel, Field, field_serializer
+from pydantic import ConfigDict
+from datetime import date, datetime
 
 class ShoppingListCreate(BaseModel):
     nombre: str = Field(min_length=1)
@@ -32,11 +34,6 @@ class ShoppingItemOut(ShoppingItemBase):
 class ShoppingListDetail(ShoppingListOut):
     items: list[ShoppingItemOut]
 
-# app/schemas/shopping_list.py
-from pydantic import BaseModel, Field, field_serializer
-from pydantic import ConfigDict
-from datetime import date, datetime
-
 # ----------------------
 # Input schemas
 # ----------------------
@@ -49,6 +46,7 @@ class ShoppingListRename(BaseModel):
 class ShoppingItemBase(BaseModel):
     nombre: str = Field(min_length=1)
     cantidad: str = Field(min_length=1)
+    done: Optional[bool] = False
 
 class ShoppingItemCreate(ShoppingItemBase):
     pass
@@ -56,6 +54,7 @@ class ShoppingItemCreate(ShoppingItemBase):
 class ShoppingItemUpdate(BaseModel):
     nombre: str | None = None
     cantidad: str | None = None
+    done: bool | None = None
 
 # ----------------------
 # Output schemas
@@ -77,6 +76,7 @@ class ShoppingItemOut(ShoppingItemBase):
     id: int
     list_id: int
     created_at: datetime
+    done: bool
 
     model_config = ConfigDict(from_attributes=True)
 

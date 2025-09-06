@@ -7,12 +7,15 @@ if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 from fastapi import FastAPI
-from starlette.concurrency import run_in_threadpool   
+from fastapi.concurrency import run_in_threadpool   
 from app.core.browser import browser_manager
 from app.routers.auth import router as auth_router
 from app.routers.shopping_list import router as shopping_list
 from app.routers.scrap import router as scrap_router
+from app.db import Base, engine
 from app.db_init import init_tables_sync
+from app.auth import models as _  # noqa: F401
+from app.routers import user
 
 
 app = FastAPI(title="Groceries Search API", version="1.0.0")
@@ -21,10 +24,12 @@ app = FastAPI(title="Groceries Search API", version="1.0.0")
 async def on_startup():  
     await run_in_threadpool(browser_manager.startup, True)
     init_tables_sync()
+    Base.metadata.create_all(bind=engine)
 
 app.include_router(auth_router)
 app.include_router(shopping_list)
 app.include_router(scrap_router)
+app.include_router(user.router)
 
 @app.on_event("shutdown")
 async def on_shutdown():  

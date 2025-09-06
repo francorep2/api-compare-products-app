@@ -26,6 +26,7 @@ def get_my_lists(db: Session = Depends(get_db), user=Depends(get_current_user)):
     lists = list_user_lists(db, user.id)
     return [ShoppingListOut(id=l.id, nombre=l.nombre, created_at=l.created_at) for l in lists]
 
+# app/routers/shopping.py
 @router.get("/lists/{list_id}", response_model=ShoppingListDetail)
 def get_list_detail(list_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
     lst = get_user_list(db, user.id, list_id)
@@ -34,21 +35,39 @@ def get_list_detail(list_id: int, db: Session = Depends(get_db), user=Depends(ge
     items = list_items(db, user.id, list_id)
     return ShoppingListDetail(
         id=lst.id, nombre=lst.nombre, created_at=lst.created_at,
-        items=[ShoppingItemOut(id=i.id, list_id=i.list_id, nombre=i.nombre, cantidad=i.cantidad, created_at=i.created_at) for i in items]
+        items=[ShoppingItemOut(
+            id=i.id, list_id=i.list_id, nombre=i.nombre, cantidad=i.cantidad, done=i.done, created_at=i.created_at
+        ) for i in items]
     )
 
-@router.patch("/lists/{list_id}", response_model=ShoppingListOut)
-def rename_list_(list_id: int, payload: ShoppingListRename, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    lst = rename_user_list(db, user.id, list_id, payload.nombre)
+@router.get("/lists/{list_id}/items", response_model=list[ShoppingItemOut])
+def list_items_(list_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    lst = get_user_list(db, user.id, list_id)
     if not lst:
         raise HTTPException(status_code=404, detail="Lista no encontrada")
-    return ShoppingListOut(id=lst.id, nombre=lst.nombre, created_at=lst.created_at)
+    items = list_items(db, user.id, list_id)
+    return [ShoppingItemOut(
+        id=i.id, list_id=i.list_id, nombre=i.nombre, cantidad=i.cantidad, done=i.done, created_at=i.created_at
+    ) for i in items]
 
-@router.delete("/lists/{list_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_list_(list_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    ok = delete_user_list(db, user.id, list_id)
-    if not ok:
+@router.post("/lists/{list_id}/items", response_model=ShoppingItemOut, status_code=status.HTTP_201_CREATED)
+def add_item_(list_id: int, payload: ShoppingItemCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    item = add_item(db, user.id, list_id, payload.nombre, payload.cantidad, payload.done or False)  # 👈
+    if not item:
         raise HTTPException(status_code=404, detail="Lista no encontrada")
+    return ShoppingItemOut(
+        id=item.id, list_id=item.list_id, nombre=item.nombre, cantidad=item.cantidad, done=item.done, created_at=item.created_at
+    )
+
+@router.patch("/items/{item_id}", response_model=ShoppingItemOut)
+def update_item_(item_id: int, payload: ShoppingItemUpdate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    item = update_item(db, user.id, item_id, payload.nombre, payload.cantidad, payload.done)  # 👈
+    if not item:
+        raise HTTPException(status_code=404, detail="Item no encontrado")
+    return ShoppingItemOut(
+        id=item.id, list_id=item.list_id, nombre=item.nombre, cantidad=item.cantidad, done=item.done, created_at=item.created_at
+    )
+
 
 # -------- ITEMS --------
 @router.get("/lists/{list_id}/items", response_model=list[ShoppingItemOut])

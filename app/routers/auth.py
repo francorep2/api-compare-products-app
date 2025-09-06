@@ -1,7 +1,7 @@
 # app/auth/router.py
 from fastapi import APIRouter, Depends, HTTPException, status, Header, BackgroundTasks
 from sqlalchemy.orm import Session
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 from app.db import get_db
 from app.schemas import auth as S
@@ -40,10 +40,10 @@ def password_reset_start(
     db: Session = Depends(get_db),
 ):
     user = db.query(User).filter(User.email == data.email.lower()).first()
-    # Siempre responder 200 para no filtrar existencia; pero sólo enviar si existe
-    if user and user.is_active:
-        _create_pwd_otp(bg, db, user)
-    return {"message": "Si el email existe, enviamos un código para verificar"}
+    if not user or not user.is_active:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "El email no existe")
+    challenge = _create_pwd_otp(bg, db, user)
+    return {"challenge_id": challenge, "message": "Te enviamos un código a tu correo"}
 
 @router.post("/password/reset/resend")
 def password_reset_resend(
@@ -138,13 +138,15 @@ def _mask(email: str) -> str:
 
 
 def _create_pending_and_queue_email(
-    bg: BackgroundTasks, db: Session, email: str, password_hash: str
+    bg: BackgroundTasks,
+    db: Session,
+    *,
+    first_name: str,
+    last_name: str,
+    email: str,
+    password_hash: str,
 ) -> str:
-    """
-    Crea/renueva un registro pendiente de alta y envía OTP por mail (en background).
-    No crea el User todavía.
-    """
-    # Invalidar pendientes anteriores no consumidos para ese email (opcional)
+ 
     db.query(PendingRegistration).filter(
         PendingRegistration.email == email.lower(),
         PendingRegistration.consumed == False
@@ -154,7 +156,9 @@ def _create_pending_and_queue_email(
     challenge = new_challenge_id()
 
     pending = PendingRegistration(
-        email=email.lower(),
+        first_name=first_name.strip(),
+        last_name=last_name.strip(),
+        email=email.lower().strip(),
         password_hash=password_hash,
         challenge_id=challenge,
         code=code,
@@ -163,7 +167,6 @@ def _create_pending_and_queue_email(
     db.add(pending)
     db.commit()
 
-    # Enviar OTP sin bloquear la request
     bg.add_task(send_otp_email, email, code, "verify")
     return challenge
 
@@ -184,6 +187,8 @@ def register_start(
     challenge = _create_pending_and_queue_email(
         bg=bg,
         db=db,
+        first_name=data.first_name,
+        last_name=data.last_name,
         email=data.email,
         password_hash=hash_password(data.password),
     )
@@ -207,7 +212,7 @@ def register_verify(
         raise HTTPException(400, "Challenge inválido o expirado")
     if pending.consumed:
         raise HTTPException(400, "OTP ya consumido")
-    if pending.expires_at <= datetime.now(timezone.utc):
+    if pending.expires_at <= datetime.utcnow():
         raise HTTPException(400, "OTP expirado")
 
     pending.attempts += 1
@@ -235,6 +240,8 @@ def register_verify(
         password_hash=pending.password_hash,
         is_active=True,
         is_verified=True,
+        first_name=pending.first_name,
+        last_name=pending.last_name,
     )
     db.add(user)
     db.commit()
@@ -259,7 +266,7 @@ def register_resend(
         raise HTTPException(400, "Challenge inválido")
 
     # Si expiró, regenerar
-    if pending.expires_at <= datetime.now(timezone.utc):
+    if pending.expires_at <= datetime.utcnow():
         pending.code = generate_otp_code()
         pending.expires_at = minutes_from_now(OTP_TTL_MIN)
 
@@ -309,3 +316,7 @@ def me(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Usuario inválido")
 
     return S.MeOut(id=user.id, email=user.email, is_verified=user.is_verified)
+
+# ------------------------ Editar usuario ------------------------
+
+

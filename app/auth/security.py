@@ -11,7 +11,7 @@ JWT_ALG = "HS256"
 ACCESS_MINUTES = 60
 
 def create_reset_token(user_id: int, email: str, minutes: int = 15) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.utcnow()
     payload = {
         "sub": str(user_id),
         "email": email,

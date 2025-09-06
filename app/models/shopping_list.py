@@ -1,6 +1,6 @@
 # app/models/shopping.py
 from sqlalchemy.orm import Mapped, mapped_column, relationship, DeclarativeBase
-from sqlalchemy import Date, ForeignKey, text
+from sqlalchemy import Date, ForeignKey, text, Boolean
 from datetime import date, datetime
 
 class Base(DeclarativeBase):
@@ -22,5 +22,7 @@ class ShoppingItem(Base):
     list_id: Mapped[int] = mapped_column(ForeignKey("shopping_list.id", ondelete="CASCADE"), index=True)
     nombre: Mapped[str]
     cantidad: Mapped[str]
+    done: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     created_at: Mapped[str] = mapped_column(Date, server_default=text("CURRENT_DATE"))
     list: Mapped[ShoppingList] = relationship(back_populates="items")
+    

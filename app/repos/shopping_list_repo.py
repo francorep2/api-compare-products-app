@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
+
 # ---------- helpers ----------
 
 def _row_to_obj(row) -> Optional[SimpleNamespace]:
@@ -124,7 +125,7 @@ def add_item(db: Session, user_id: str, list_id: int, nombre: str, cantidad: str
     return _row_to_obj(res.fetchone())
 
 
-def update_item(db: Session, user_id: str, item_id: int, nombre: str | None, cantidad: str | None) -> Optional[SimpleNamespace]:
+def update_item(db: Session, user_id: str, item_id: int, nombre: str | None, cantidad: str | None, done : Optional[bool] = None) -> Optional[SimpleNamespace]:
     r0 = db.execute(text("SELECT list_id FROM shopping_item WHERE id = :id"), {"id": item_id}).fetchone()
     if r0 is None:
         return None
@@ -140,6 +141,9 @@ def update_item(db: Session, user_id: str, item_id: int, nombre: str | None, can
     if cantidad is not None:
         sets.append("cantidad = :cantidad")
         params["cantidad"] = cantidad
+    if done is not None:
+        sets.append("done = :done")
+        params["done"] = bool(done)
     if not sets:
         res1 = db.execute(text("SELECT id, list_id, nombre, cantidad, created_at FROM shopping_item WHERE id = :id"), {"id": item_id})
         return _row_to_obj(res1.fetchone())
