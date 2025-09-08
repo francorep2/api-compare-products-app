@@ -88,6 +88,20 @@ def delete_user_list(db: Session, user_id: str, list_id: int) -> bool:
     db.commit()
     return res.rowcount > 0
 
+def add_item(db, user_id: int, list_id: int, nombre: str, cantidad: str, done: bool = False) -> Optional[SimpleNamespace]:
+    # (opcional) validar que la lista sea del usuario
+    if not get_user_list(db, user_id, list_id):
+        return None
+
+    res = db.execute(text("""
+        INSERT INTO shopping_item (list_id, nombre, cantidad, done)
+        VALUES (:list_id, :nombre, :cantidad, :done)
+        RETURNING id, list_id, nombre, cantidad, done, created_at
+    """), {"list_id": list_id, "nombre": nombre, "cantidad": cantidad, "done": done})
+    db.commit()
+    return _row_to_obj(res.fetchone())
+
+
 
 # ---------- ITEMS ----------
 
@@ -97,7 +111,7 @@ def list_items(db: Session, user_id: str, list_id: int) -> List[SimpleNamespace]
     res = db.execute(
         text(
             """
-            SELECT id, list_id, nombre, cantidad, created_at
+            SELECT id, list_id, nombre, cantidad, created_at, done
             FROM shopping_item
             WHERE list_id = :list_id
             ORDER BY created_at DESC, id DESC
@@ -108,24 +122,26 @@ def list_items(db: Session, user_id: str, list_id: int) -> List[SimpleNamespace]
     return _rows_to_objs(res.fetchall())
 
 
-def add_item(db: Session, user_id: str, list_id: int, nombre: str, cantidad: str) -> Optional[SimpleNamespace]:
+def list_items(db: Session, user_id: str, list_id: int) -> List[SimpleNamespace]:
     if not get_user_list(db, user_id, list_id):
-        return None
+        return []
     res = db.execute(
         text(
             """
-            INSERT INTO shopping_item (list_id, nombre, cantidad)
-            VALUES (:list_id, :nombre, :cantidad)
-            RETURNING id, list_id, nombre, cantidad, created_at
+            SELECT id, list_id, nombre, cantidad, done, created_at, done
+            FROM shopping_item
+            WHERE list_id = :list_id
+            ORDER BY created_at DESC, id DESC
             """
         ),
-        {"list_id": list_id, "nombre": nombre, "cantidad": cantidad},
+        {"list_id": list_id},
     )
-    db.commit()
-    return _row_to_obj(res.fetchone())
+    return _rows_to_objs(res.fetchall())
 
 
-def update_item(db: Session, user_id: str, item_id: int, nombre: str | None, cantidad: str | None, done : Optional[bool] = None) -> Optional[SimpleNamespace]:
+def update_item(db, user_id: str, item_id: int,
+                nombre: Optional[str], cantidad: Optional[str],
+                done: Optional[bool] = None) -> Optional[SimpleNamespace]:
     r0 = db.execute(text("SELECT list_id FROM shopping_item WHERE id = :id"), {"id": item_id}).fetchone()
     if r0 is None:
         return None
@@ -135,24 +151,29 @@ def update_item(db: Session, user_id: str, item_id: int, nombre: str | None, can
 
     sets = []
     params = {"id": item_id}
+
     if nombre is not None:
         sets.append("nombre = :nombre")
         params["nombre"] = nombre
     if cantidad is not None:
         sets.append("cantidad = :cantidad")
         params["cantidad"] = cantidad
-    if done is not None:
+    if done is not None:  # 👈 clave: no usar "if done"
         sets.append("done = :done")
         params["done"] = bool(done)
+
     if not sets:
-        res1 = db.execute(text("SELECT id, list_id, nombre, cantidad, created_at FROM shopping_item WHERE id = :id"), {"id": item_id})
+        res1 = db.execute(
+            text("SELECT id, list_id, nombre, cantidad, done, created_at FROM shopping_item WHERE id = :id"),
+            {"id": item_id},
+        )
         return _row_to_obj(res1.fetchone())
 
     sql = f"""
         UPDATE shopping_item
         SET {', '.join(sets)}
         WHERE id = :id
-        RETURNING id, list_id, nombre, cantidad, created_at
+        RETURNING id, list_id, nombre, cantidad, done, created_at
     """
     res = db.execute(text(sql), params)
     db.commit()

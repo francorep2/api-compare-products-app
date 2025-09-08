@@ -50,14 +50,6 @@ def list_items_(list_id: int, db: Session = Depends(get_db), user=Depends(get_cu
         id=i.id, list_id=i.list_id, nombre=i.nombre, cantidad=i.cantidad, done=i.done, created_at=i.created_at
     ) for i in items]
 
-@router.post("/lists/{list_id}/items", response_model=ShoppingItemOut, status_code=status.HTTP_201_CREATED)
-def add_item_(list_id: int, payload: ShoppingItemCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    item = add_item(db, user.id, list_id, payload.nombre, payload.cantidad, payload.done or False)  # 👈
-    if not item:
-        raise HTTPException(status_code=404, detail="Lista no encontrada")
-    return ShoppingItemOut(
-        id=item.id, list_id=item.list_id, nombre=item.nombre, cantidad=item.cantidad, done=item.done, created_at=item.created_at
-    )
 
 @router.patch("/items/{item_id}", response_model=ShoppingItemOut)
 def update_item_(item_id: int, payload: ShoppingItemUpdate, db: Session = Depends(get_db), user=Depends(get_current_user)):
@@ -67,6 +59,12 @@ def update_item_(item_id: int, payload: ShoppingItemUpdate, db: Session = Depend
     return ShoppingItemOut(
         id=item.id, list_id=item.list_id, nombre=item.nombre, cantidad=item.cantidad, done=item.done, created_at=item.created_at
     )
+    
+@router.delete("/lists/{list_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_list_(list_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    ok = delete_user_list(db, user.id, list_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Lista no encontrada")
 
 
 # -------- ITEMS --------
@@ -76,14 +74,14 @@ def list_items_(list_id: int, db: Session = Depends(get_db), user=Depends(get_cu
     if not lst:
         raise HTTPException(status_code=404, detail="Lista no encontrada")
     items = list_items(db, user.id, list_id)
-    return [ShoppingItemOut(id=i.id, list_id=i.list_id, nombre=i.nombre, cantidad=i.cantidad, created_at=i.created_at) for i in items]
+    return [ShoppingItemOut(id=i.id, list_id=i.list_id, nombre=i.nombre, cantidad=i.cantidad, created_at=i.created_at, done=i.done) for i in items]
 
 @router.post("/lists/{list_id}/items", response_model=ShoppingItemOut, status_code=status.HTTP_201_CREATED)
 def add_item_(list_id: int, payload: ShoppingItemCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    item = add_item(db, user.id, list_id, payload.nombre, payload.cantidad)
+    item = add_item(db, user.id, list_id, payload.nombre, payload.cantidad, payload.done or False)
     if not item:
         raise HTTPException(status_code=404, detail="Lista no encontrada")
-    return ShoppingItemOut(id=item.id, list_id=item.list_id, nombre=item.nombre, cantidad=item.cantidad, created_at=item.created_at)
+    return ShoppingItemOut(id=item.id, list_id=item.list_id, nombre=item.nombre, cantidad=item.cantidad, created_at=item.created_at , done=item.done)
 
 @router.patch("/items/{item_id}", response_model=ShoppingItemOut)
 def update_item_(item_id: int, payload: ShoppingItemUpdate, db: Session = Depends(get_db), user=Depends(get_current_user)):

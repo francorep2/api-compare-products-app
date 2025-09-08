@@ -18,6 +18,7 @@ class ShoppingListOut(BaseModel):
 class ShoppingItemBase(BaseModel):
     nombre: str = Field(min_length=1)
     cantidad: str = Field(min_length=1)
+    done: Optional[bool] = False
 
 class ShoppingItemCreate(ShoppingItemBase):
     pass
@@ -25,11 +26,13 @@ class ShoppingItemCreate(ShoppingItemBase):
 class ShoppingItemUpdate(BaseModel):
     nombre: str | None = None
     cantidad: str | None = None
+    done: Optional[bool] = False
 
 class ShoppingItemOut(ShoppingItemBase):
     id: int
     list_id: int
     created_at: datetime
+    done: Optional[bool] = False
 
 class ShoppingListDetail(ShoppingListOut):
     items: list[ShoppingItemOut]
