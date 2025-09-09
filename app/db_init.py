@@ -19,11 +19,13 @@ CREATE TABLE IF NOT EXISTS shopping_item (
   list_id    BIGINT NOT NULL REFERENCES shopping_list(id) ON DELETE CASCADE,
   nombre     TEXT NOT NULL CHECK (length(btrim(nombre)) > 0),
   cantidad   TEXT NOT NULL CHECK (length(btrim(cantidad)) > 0),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  done       BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE INDEX IF NOT EXISTS idx_shopping_item_list ON shopping_item (list_id, created_at DESC);
 
 COMMIT;
+
 """
 
 def init_tables_sync():
