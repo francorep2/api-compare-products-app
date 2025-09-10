@@ -85,3 +85,11 @@ class ShoppingItemOut(ShoppingItemBase):
 
 class ShoppingListDetail(ShoppingListOut):
     items: list[ShoppingItemOut]
+    
+class SearchHit(BaseModel):
+    title: Optional[str]
+    price: Optional[str]
+    url: Optional[str]  # o HttpUrl si siempre es URL válida
+    image_url: Optional[str] = None
+    barcode: Optional[str] = None
+    store: str

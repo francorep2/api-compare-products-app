@@ -60,13 +60,3 @@ async def search_all_endpoint(
 ):
     return await search_all_grouped(q=q, barcode=barcode, limit=limit)
 
-
-@router.get("/all/barcode")
-async def search_all_barcode_endpoint(
-    barcode: str = Query(..., min_length=8, description="Código EAN/UPC"),
-    limit: int = Query(3, ge=1, le=10),
-    debug: int = Query(0, ge=0, le=2, description="0=off, 1=diag, 2=diag+raw"),
-):
-    if not barcode.isdigit():
-        raise HTTPException(status_code=400, detail="El barcode debe ser numérico")
-    return await search_all_grouped_barcode(barcode=barcode, limit=limit, debug=debug)

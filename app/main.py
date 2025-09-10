@@ -15,8 +15,7 @@ from app.db_init import init_tables_sync
 from app.auth import models as _  # noqa: F401
 from app.routers import user
 from app.core.browser_async import browser_manager_async
-
-
+from app.routers import search
 
 app = FastAPI(title="Groceries Search API", version="1.0.0")
 
@@ -25,6 +24,8 @@ app.include_router(auth_router)
 app.include_router(shopping_list)
 app.include_router(scrap_router)
 app.include_router(user.router)
+app.include_router(search.router)
+
 
 @app.on_event("startup")
 async def on_startup():  
