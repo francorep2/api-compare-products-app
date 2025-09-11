@@ -1,59 +1,45 @@
 # app/core/browser.py
-from contextlib import contextmanager
-from playwright.sync_api import sync_playwright
-import threading
+from contextlib import asynccontextmanager
+from playwright.async_api import async_playwright
 
-DEFAULT_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
+DEFAULT_CTX = {
+    "locale": "es-AR",
+    "user_agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+    ),
+    "viewport": {"width": 1366, "height": 800},
+}
 
-class BrowserManager:
+class AsyncBrowserManager:
     def __init__(self):
-        # Un TLS por hilo para p/pw y browser
-        self._local = threading.local()
+        self._pw = None
+        self._browser = None
 
-    def _ensure(self, headless: bool = True):
-        """Asegura que en ESTE hilo haya un playwright y un browser vivos."""
-        pw = getattr(self._local, "pw", None)
-        br = getattr(self._local, "br", None)
-        if pw is None or br is None:
-            pw = sync_playwright().start()
-            br = pw.chromium.launch(headless=headless, args=DEFAULT_ARGS)
-            self._local.pw = pw
-            self._local.br = br
+    async def startup(self):
+        if self._pw is None:
+            self._pw = await async_playwright().start()
+            self._browser = await self._pw.chromium.launch(headless=True)
 
-    def startup(self, headless: bool = True):
-        """Opcional: precalienta browser en el hilo actual."""
-        self._ensure(headless=headless)
+    async def shutdown(self):
+        if self._browser:
+            await self._browser.close()
+        if self._pw:
+            await self._pw.stop()
+        self._browser = None
+        self._pw = None
 
-    def shutdown(self):
-        """Cierra browser y playwright del hilo actual (si existen)."""
-        br = getattr(self._local, "br", None)
-        pw = getattr(self._local, "pw", None)
+    @asynccontextmanager
+    async def new_context(self, **ctx_overrides):
+        ctx = DEFAULT_CTX | ctx_overrides
+        context = await self._browser.new_context(
+            user_agent=ctx["user_agent"],
+            locale=ctx["locale"],
+            viewport=ctx["viewport"],
+        )
         try:
-            if br:
-                br.close()
+            yield context
         finally:
-            self._local.br = None
-        try:
-            if pw:
-                pw.stop()
-        finally:
-            self._local.pw = None
+            await context.close()
 
-    @contextmanager
-    def new_context(self, headless: bool = True, **kwargs):
-        """
-        Crea un browser context nuevo y lo cierra al salir.
-        Usa el browser del hilo actual; si no existe, lo crea.
-        """
-        self._ensure(headless=headless)
-        ctx = self._local.br.new_context(**kwargs)
-        try:
-            yield ctx
-        finally:
-            try:
-                ctx.close()
-            except Exception:
-                pass
-
-# Instancia global reusada por tus servicios
-browser_manager = BrowserManager()
+browser_manager = AsyncBrowserManager()
