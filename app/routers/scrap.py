@@ -1,16 +1,19 @@
+# app/routers/scrap.py
 from typing import Optional
 from fastapi import Query, APIRouter, HTTPException
 
-from app.models.search_item import SearchItem, SearchResponse
+# Se importan los servicios individuales para las rutas específicas
 from app.services.coto import search_coto
-from app.services.dia import search_dia  
+from app.services.dia import search_dia
 from app.services.carrefour import search_carrefour
-from app.services.jumbo import search_jumbo  
-from app.services.all import search_all_grouped, search_all_by_barcode
-from app.services.search import search_all_grouped_barcode 
+from app.services.jumbo import search_jumbo
+
+# IMPORTANTE: Se usan únicamente las funciones del servicio 'search.py' para las búsquedas "all"
+from app.services.search import search_all_grouped, search_all_grouped_barcode
 
 router = APIRouter(prefix="/search", tags=["search"])
 
+# --- RUTAS INDIVIDUALES (no necesitan cambios) ---
 
 @router.get("/coto")
 async def search_coto_endpoint(
@@ -52,11 +55,31 @@ async def search_jumbo_endpoint(
     return {"results": items}
 
 
-@router.get("/all")
-async def search_all_endpoint(
-    q: str | None = Query(None),
-    barcode: str | None = Query(None),
-    limit: int = Query(3, ge=1, le=10),
-):
-    return await search_all_grouped(q=q, barcode=barcode, limit=limit)
+# --- RUTAS "ALL" (CORREGIDAS Y UNIFICADAS) ---
 
+@router.get("/all", summary="Buscar por texto en todas las tiendas")
+async def search_all_endpoint(
+    q: str = Query(..., description="El texto a buscar"),
+    limit: int = Query(3, ge=1, le=10),
+    debug: int = Query(0, ge=0, le=2, description="Nivel de debug: 1 para logs, 2 para logs y datos crudos")
+):
+    """
+    Busca un producto por texto en todas las tiendas utilizando el motor de búsqueda unificado.
+    """
+    # Se asegura de llamar a la función correcta de 'app/services/search.py'
+    return await search_all_grouped(q=q, limit=limit, debug=debug)
+
+
+@router.get("/all/barcode", summary="Buscar por código de barras en todas las tiendas")
+async def search_all_barcode_endpoint(
+    barcode: str = Query(..., description="El código de barras para buscar"),
+    limit: int = Query(3, ge=1, le=10),
+    debug: int = Query(0, ge=0, le=2, description="Nivel de debug: 1 para logs, 2 para logs y datos crudos")
+):
+    """
+    Busca un producto por código de barras en todas las tiendas utilizando el motor de búsqueda unificado.
+    """
+    if not barcode:
+        raise HTTPException(status_code=400, detail="El código de barras es requerido")
+    # Se asegura de llamar a la función correcta de 'app/services/search.py'
+    return await search_all_grouped_barcode(barcode=barcode, limit=limit, debug=debug)

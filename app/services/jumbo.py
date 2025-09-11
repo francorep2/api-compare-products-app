@@ -1,33 +1,19 @@
-from typing import List, Dict, Optional
-import asyncio
-from urllib.parse import quote
-from app.core.browser import browser_manager
-from app.scrapers.vtex_helper import parse_vtex_hits
+from typing import Dict, List, Optional
+from app.core.browser_async import browser_manager_async
+from app.scrapers import jumbo_scraper_async as jumbo_search
 
-BASE = "https://www.jumbo.com.ar"
-
-def _jumbo_worker(q: Optional[str], barcode: Optional[str], limit: int) -> List[Dict]:
-    query = barcode or q
-    if not query:
-        return []
-    with browser_manager.new_context(
-        locale="es-AR",
-        user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"),
-        viewport={"width": 1366, "height": 800},
-    ) as ctx:
-        page = ctx.new_page()
-        try:
-            page.goto(BASE, wait_until="domcontentloaded", timeout=20000)
-        except Exception:
-            pass
-
-        url = f"{BASE}/api/catalog_system/pub/products/search/?ft={quote(query)}&_from=0&_to={max(0,limit-1)}"
-        resp = page.request.get(url, timeout=20000)
-        if not resp.ok:
-            return []
-        data = resp.json()
-        return parse_vtex_hits(data, "jumbo", BASE, limit)
-
-async def search_jumbo(q: Optional[str]=None, barcode: Optional[str]=None, limit: int=3) -> List[Dict]:
-    return await asyncio.to_thread(_jumbo_worker, q, barcode, limit)
+async def search_jumbo(
+    q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3
+) -> List[Dict]:
+    """Busca en Jumbo usando el scraper asincrónico."""
+    async with browser_manager_async.get_browser_context() as context:
+        results = await jumbo_search.search(context, q=q, barcode=barcode, limit=limit)
+    
+    # FIX DEFINITIVO:
+    # Se elimina la clave 'store' de cada resultado para prevenir
+    # errores de instanciación en el código que lo consume.
+    for item in results:
+        if isinstance(item, dict):
+            item.pop('store', None)
+            
+    return results
