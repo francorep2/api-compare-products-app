@@ -358,22 +358,59 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
     page = await ctx.new_page()
     try:
         print(f"[LOG] Coto classic GET {search_url}")
-        resp = await page.goto(search_url, wait_until="domcontentloaded", timeout=50000)
+        resp = await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
         print(f"[LOG] Classic status: {resp.status if resp else 'N/A'} | title: {await page.title()}")
 
-        await page.wait_for_selector("a[href*='/sitios/cdigi/productos/']", timeout=9000)
-        anchors = page.locator("a[href*='/sitios/cdigi/productos/']")
-        total = await anchors.count()
-        print(f"[LOG] Anchors producto: {total}")
+        try:
+            await page.wait_for_load_state("networkidle", timeout=6000)
+        except:
+            pass
+
+        for _ in range(3):
+            await page.mouse.wheel(0, 1200)
+            await asyncio.sleep(0.25)
+
+        anchors = None
+        try:
+            anchors = page.locator("a[href*='/sitios/cdigi/productos/']")
+            total = await anchors.count()
+        except:
+            total = 0
+
+        if not total:
+            try:
+                await page.wait_for_selector("a[href*='/sitios/cdigi/productos/']", state="attached", timeout=4000)
+                anchors = page.locator("a[href*='/sitios/cdigi/productos/']")
+                total = await anchors.count()
+            except:
+                total = 0
+
+        hrefs: list[str] = []
+        titles: list[str] = []
+
+        if total:
+            take = min(total, max(24, limit*8))
+            for i in range(take):
+                a = anchors.nth(i)
+                href = await a.get_attribute("href") or ""
+                title = await a.inner_text() or ""
+                if href and href not in hrefs:
+                    hrefs.append(href)
+                    titles.append(title)
+        else:
+            html = await page.content()
+            found = re.findall(r'href="([^"]+/sitios/cdigi/productos/[^"]+)"', html, flags=re.I)
+            for h in found:
+                if h not in hrefs:
+                    hrefs.append(h)
+                    titles.append("")
+
+        print(f"[LOG] Anchors producto: {len(hrefs)}")
 
         results, seen = [], set()
-        for i in range(min(total, limit*6)):
-            a = anchors.nth(i)
-            href = await a.get_attribute("href") or ""
-            if not href:
-                continue
+        for href in hrefs:
             pdp = await fetch_coto_pdp(ctx, href)
-            if not pdp["url"] or pdp["url"] in seen:
+            if not pdp.get("url") or pdp["url"] in seen:
                 continue
             seen.add(pdp["url"])
             results.append(pdp)
@@ -389,6 +426,7 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
         return []
     finally:
         await page.close()
+
 
 # ===================== Búsqueda por barcode =====================
 
