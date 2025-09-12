@@ -4,8 +4,7 @@ from typing import Dict, List, Optional
 from app.models.search_item import SearchItem
 from app.services.barcode.jumbo_barcode import search_jumbo_barcode
 from app.services.barcode.carrefour_barcode import search_carrefour_barcode
-from app.services.barcode.dia_barcode import search_dia_barcode
-from app.services.barcode.coto_barcode import search_coto_barcode
+from app.services.barcode.dia_barcode import search_dia_barcode 
 from app.services.coto import search_coto
 from app.services.peer_name_resolver import resolve_product_name_from_peers
 import logging, re, unicodedata, inspect
