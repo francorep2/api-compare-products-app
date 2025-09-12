@@ -3,17 +3,32 @@ from typing import List, Dict, Optional
 import json, urllib.parse, re, time, datetime, os
 import asyncio
 import re
+import re
+import unicodedata
 
-def _query_terms(q: str) -> list[str]:
-    if not q: return []
-    # tokens de 3+ letras/numeros (evita “de”, “la”, etc.)
-    return [t for t in re.findall(r"[A-Za-z0-9]{3,}", q.lower())]
+def _norm_text(s: str) -> str:
+    s = s.lower().strip()
+    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"\s{2,}", " ", s)
+    return s
 
-def _title_matches(q_terms: list[str], title: str | None) -> bool:
-    if not title or not q_terms: 
-        return True  # si no hay términos, no filtramos
-    tl = title.lower()
-    return any(t in tl for t in q_terms)
+def _title_seems_related(title: str, q: str) -> bool:
+    t = _norm_text(title)
+    s = _norm_text(q)
+    # must-have tokens (ajustables)
+    must = []
+    if "cofler" in s: must.append("cofler")
+    for k in ("galletita", "galletitas", "cookie", "cookies"):
+        if k in s: 
+            must.append(k)
+            break
+    # opcional: sabor/descriptor
+    for k in ("chocolate", "chips"):
+        if k in s: must.append(k)
+    # al menos 2 must
+    ok = sum(1 for m in must if m in t)
+    return ok >= max(2, len(must) - 1)
 
 TOP_N = 3
 
