@@ -3,10 +3,10 @@ import asyncio
 from fastapi import APIRouter, Query
 from typing import Dict, List
 from app.models.search_item import SearchItem
-from app.services.barcode.jumbo_barcode import search_jumbo_by_barcode
-from app.services.barcode.carrefour_barcode import search_carrefour_by_barcode
-from app.services.barcode.dia_barcode import search_dia_by_barcode
-from app.services.barcode.coto_barcode import search_coto_by_barcode
+from app.services.barcode.jumbo_barcode import search_jumbo_barcode
+from app.services.barcode.carrefour_barcode import search_carrefour_barcode
+from app.services.barcode.dia_barcode import search_dia_barcode
+from app.services.barcode.coto_barcode import search_coto_barcode
 
 router = APIRouter(prefix="/search/barcode", tags=["barcode"])
 @router.get("/all", response_model=Dict[str, List[SearchItem]])
@@ -15,10 +15,10 @@ async def search_barcode_all(
     limit: int = Query(3, ge=1, le=10),
 ):
     tasks = [
-        search_jumbo_by_barcode(barcode, limit),
-        search_carrefour_by_barcode(barcode, limit),
-        search_dia_by_barcode(barcode, limit),
-        search_coto_by_barcode(barcode, limit),
+        search_jumbo_barcode(barcode, limit),
+        search_carrefour_barcode(barcode, limit),
+        search_dia_barcode(barcode, limit),
+        search_coto_barcode(barcode, limit),
     ]
     # Que ninguna excepción rompa todo el endpoint
     results = await asyncio.gather(*tasks, return_exceptions=True)
