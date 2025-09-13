@@ -1,35 +1,38 @@
 import asyncio
+import logging
+import re
+import unicodedata
+import inspect
 from fastapi import APIRouter, Query
 from typing import Dict, List, Optional
 from app.models.search_item import SearchItem
-from app.services.barcode.jumbo_barcode import search_jumbo_barcode
-from app.services.barcode.carrefour_barcode import search_carrefour_barcode
-from app.services.barcode.dia_barcode import search_dia_barcode 
 from app.services.coto import search_coto
 from app.services.peer_name_resolver import resolve_product_name_from_peers
-import logging, re, unicodedata, inspect
-
+from app.services.jumbo import search_jumbo
+from app.services.carrefour import search_carrefour
+from app.services.dia import search_dia
+from scrapers.barcode_resolver import (
+    resolve_name_carrefour,
+    resolve_name_dia,
+    resolve_name_jumbo,
+)
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/search/barcode", tags=["barcode"])
 
-# ===== STOPWORDS =====
 STOP = {
     "de","del","la","el","los","las","con","sin","x","por","y","en","a","al","para",
     "un","una","lo","su","sus","mi","mis","tu","tus"
 }
 
-# ===== UNIDADES / TAMAÑOS =====
 UNITS = {"g","gr","grs","gramo","gramos","kg","kgs","kilo","kilos","ml","cc","l","lt","lts","litro","litros","unidad","unidades","cm3"}
 SIZE_PAT = r"\b(\d{1,5})\s*(g|gr|grs|kg|ml|l|lt|lts|cc|cm3|kilos?|litros?)\b"
 
-# ===== MULTIPACKS / CANTIDADES =====
 PACK_HINTS = {
     "pack","packx","pack2","pack3","pack4","pack6","pack12","pack24","x2","x3","x4","x6","x12","x24",
     "combo","multipack","promo","doble","triple"
 }
 
-# ===== CATEGORÍAS (genéricas, ampliables) =====
 CAT_FAMILY = {
     "arroz","fideos","pasta","pastas","harina","azucar","sal","cafe","té","te","mate","yerba",
     "salsa","salsas","pure","puré","caldo","caldos","sopa","sopas","aceite","vinagre","cereal","cereales",
@@ -46,14 +49,12 @@ CAT_FAMILY = {
     "carne","pollo","cerdo","pescado","fiambre","queso","fruta","verdura","huevo","huevos",
 }
 
-# ===== FORMAS / PRESENTACIONES =====
 FORMS = {
     "polvo","instantaneo","instantanea","instantánea","sobres","sobre","saquitos",
     "botella","lata","latita","tetra","brick","doypack","frasco","bolsa","sachet","caja","bandeja",
     "bidon","bidón","granel"
 }
 
-# ===== VARIEDADES / SABORES / ATRIBUTOS (no solo alimentos) =====
 VARIANTS = {
     "vainilla","chocolate","menta","mentol","dulce","amargo","coco","almendra","avellana","avena",
     "frutilla","manzana","pera","uva","anana","ananá","durazno","ciruela","cereza","pomelo","naranja",
@@ -63,7 +64,6 @@ VARIANTS = {
     "lavanda","limpio","limpieza","antibacterial","antibacteriano","antisarro","limon","limón","floral","primavera",
 }
 
-# ===== MARCAS (lista abierta, agregar según dataset) =====
 BRANDS_HINT = {
     "arcor","tang","clight","bc","ser","manaos","coca","coca-cola","pepsi","aquarius","villavicencio","levite","levité",
     "glaciar","eco","gatorade","powerade","speed","redbull","red bull","monster","quilmes","andes","brahma","heineken",
@@ -73,7 +73,6 @@ BRANDS_HINT = {
     "coto","dia","jumbo","carrefour",
 }
 
-# ===== SINÓNIMOS / CANONICALIZACIÓN =====
 SYN = {
     "gramos":"g","gramo":"g","grs":"g","gr":"g","kilo":"kg","kilos":"kg","lts":"l","lt":"l","litros":"l","litro":"l",
     "centimetros cubicos":"cc","cm3":"cc",
@@ -82,9 +81,6 @@ SYN = {
     "galletita":"galletitas","cookie":"cookies","bebidas":"bebida","yogurt":"yogur","higiénico":"higienico",
     "redbull":"red bull","la serenísima":"la serenisima",
 }
-
-
-import re, unicodedata
 
 def _strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
@@ -96,12 +92,9 @@ def _canon(tok: str) -> str:
 def _norm(s: str) -> str:
     s = (s or "").lower().strip()
     s = _strip_accents(s)
-    # unificar tamaños: "15 gr", "15gr.", "1.5 l", "500 ml"
     s = re.sub(SIZE_PAT, lambda m: f"{m.group(1)}{SYN.get(m.group(2), m.group(2))}", s)
-    # unificar multipacks pegados: "pack x 6", "x6"
     s = re.sub(r"\bpack\s*x\s*(\d+)\b", r"pack\1", s)
-    s = re.sub(r"\bx\s*(\d+)\b", r"x\1", s)  # conserva x2, x3 como token
-    # limpiar signos
+    s = re.sub(r"\bx\s*(\d+)\b", r"x\1", s)
     s = re.sub(r"[^\w\s]", " ", s)
     s = re.sub(r"\s{2,}", " ", s)
     return s.strip()
@@ -117,9 +110,7 @@ def _tokens(s: str) -> list[str]:
     return out
 
 def _extract_sizes(tokens: list[str]) -> list[str]:
-    # tokens normalizados incluyen "15g", "500ml", "1l" por SIZE_PAT
     sizes = [t for t in tokens if re.match(r"^\d{1,5}(g|kg|ml|l|cc)$", t)]
-    # dedup preservando orden
     seen=set(); out=[]
     for t in sizes:
         if t not in seen:
@@ -138,11 +129,9 @@ def _extract_packs(tokens: list[str]) -> list[str]:
     return out
 
 def _extract_brand(tokens: list[str]) -> str | None:
-    # 1) marca conocida
     for t in tokens:
         if t in BRANDS_HINT:
             return t
-    # 2) heurística: primer token que no sea categoría/forma/variante/size/pack/num
     for t in tokens:
         if t in CAT_FAMILY or t in FORMS or t in VARIANTS:
             continue
@@ -188,22 +177,17 @@ def _dedup(seq: list[str]) -> list[str]:
 def build_generic_queries(q: str, max_queries: int = 10) -> list[str]:
     toks = _tokens(q)
     brand = _extract_brand(toks)
-    cats  = _extract_categories(toks)       # puede haber varias
+    cats  = _extract_categories(toks)
     forms = _extract_forms(toks)
-    vars_ = _extract_variants(toks)         # sabores/variedades/atributos
+    vars_ = _extract_variants(toks)
     sizes = _extract_sizes(toks)
     packs = _extract_packs(toks)
-
-    # Base semántica: categoría dominante (si hay), sino "producto"
     base_cat = cats[0] if cats else "producto"
-    form_str = " ".join(forms[:2]) if forms else ""           # ej: "en polvo", "botella", etc. (ya normalizado sin preposición)
-    var_str  = " ".join(vars_[:2]) if vars_ else ""           # ej: "naranja dulce", "light", etc.
+    form_str = " ".join(forms[:2]) if forms else ""
+    var_str  = " ".join(vars_[:2]) if vars_ else ""
     size_1   = sizes[0] if sizes else ""
     pack_1   = packs[0] if packs else ""
-
     combos: list[str] = []
-
-    # Grupo A (alta precisión)
     if brand and var_str:
         combos += [
             f"{base_cat} {form_str} {brand} {var_str}",
@@ -222,12 +206,8 @@ def build_generic_queries(q: str, max_queries: int = 10) -> list[str]:
             f"{base_cat} {var_str}",
         ]
     if form_str:
-        combos += [
-            f"{base_cat} {form_str}",
-        ]
+        combos += [f"{base_cat} {form_str}"]
     combos += [f"{base_cat}"]
-
-    # Grupo B (añadir tamaño/pack)
     if size_1:
         combos += [
             f"{base_cat} {brand or ''} {var_str} {size_1}",
@@ -239,16 +219,10 @@ def build_generic_queries(q: str, max_queries: int = 10) -> list[str]:
             f"{base_cat} {brand or ''} {var_str} {pack_1}",
             f"{base_cat} {pack_1}",
         ]
-
-    # Generar alguna combinación enriquecida si hay varias categorías (p.ej., “alimento perro”)
     if len(cats) >= 2:
         combos.insert(0, " ".join(cats[:2]))
-
-    # Limpieza y cap
     combos = _dedup([c.strip() for c in combos if c.strip()])
     return combos[:max_queries]
-
-
 
 def _similarity(a: str, b: str) -> float:
     A, B = set(_tokens(a)), set(_tokens(b))
@@ -315,33 +289,24 @@ async def search_barcode_all(
     barcode: str = Query(..., min_length=5, max_length=32),
     limit: int = Query(3, ge=1, le=10),
 ):
-    # 1) Resolver nombre esperado (puede retornar None)
     q: Optional[str] = await resolve_product_name_from_peers(barcode)
-
-    # 2) Intento Coto directo por barcode (si tenés servicio dedicado)
     coto_direct: List[SearchItem] = []
     try:
-        coto_direct = await search_coto(barcode, limit)  # <- si no lo tenés, deja []
+        coto_direct = await search_coto(barcode, limit)
     except Exception:
         coto_direct = []
-
-    # 3) Si Coto directo no dio, prepará fallback por texto (todo sin crear corutinas aún)
     coto_items: List[SearchItem] = coto_direct
     if not coto_items and q:
         try:
-            brands, cats, _ = _split_keywords(q)  # <<— acá estaba el ValueError
+            brands, cats, _ = _split_keywords(q)
         except Exception:
             brands, cats = set(), set()
-
-        # generar queries enriquecidas (usa tu build_* que prefieras)
         queries = build_generic_queries(q, max_queries=8)
-
         for q_try in queries:
             try:
                 cand = await coto_search_safe(q_try, max(5, int(limit)))
             except Exception:
                 cand = []
-
             picked = pick_best_one(
                 cand,
                 expected=q,
@@ -355,18 +320,21 @@ async def search_barcode_all(
                 coto_items = picked
                 break
 
-    # 4) Recién ahora creamos corutinas para las demás tiendas y las esperamos
+    name_carrefour, name_dia, name_jumbo = await asyncio.gather(
+        resolve_name_carrefour(barcode),
+        resolve_name_dia(barcode),
+        resolve_name_jumbo(barcode),
+    )
+
     tasks = [
-        search_jumbo_barcode(barcode, limit),
-        search_carrefour_barcode(barcode, limit),
-        search_dia_barcode(barcode, limit),
+        search_carrefour(q=name_carrefour, limit=limit) if name_carrefour else asyncio.sleep(0, result=[]),
+        search_dia(q=name_dia, limit=limit) if name_dia else asyncio.sleep(0, result=[]),
+        search_jumbo(q=name_jumbo, limit=limit) if name_jumbo else asyncio.sleep(0, result=[]),
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     def _safe(r):
         return [] if isinstance(r, Exception) else (r or [])
 
-    jumbo, carrefour, dia = map(_safe, results)
-
+    carrefour, dia, jumbo = map(_safe, results)
     return {"jumbo": jumbo, "carrefour": carrefour, "dia": dia, "coto": coto_items}
-
