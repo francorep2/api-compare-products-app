@@ -28,57 +28,89 @@ async def _try_close_banners(page):
                 await asyncio.sleep(0.2)
         except: pass
 
-async def _vtex_api_search(page, base_url: str, query: str, limit: int):
-    """Usa VTEX Catalog Search API: /api/catalog_system/pub/products/search/<query>"""
-    api = f"{base_url}/api/catalog_system/pub/products/search/{query}"
+import urllib.parse
+import re
+from typing import List, Dict, Optional, Any
+
+async def _vtex_api_search(ctx, base_url: str, query: str, limit: int) -> List[Dict[str, Any]]:
+    """
+    Llama a VTEX /api/catalog_system/pub/products/search/<query>
+    y devuelve una lista de productos normalizados (máx limit*3 para luego filtrar).
+    """
+    # Quote defensivo del query
+    q = urllib.parse.quote(query or "")
+    api = f"{base_url}/api/catalog_system/pub/products/search/{q}"
+
     try:
-        resp = await page.request.get(api, timeout=30000)
-        if resp.ok:
-            data = await resp.json()
-            items = []
-            for p in data[: max(limit*3, limit)]:  # traemos más y luego filtramos
-                title = p.get("productName") or p.get("productTitle")
-                link_text = p.get("linkText") or p.get("link") or ""
-                url = f"{base_url}/{link_text}/p" if link_text else p.get("link") or ""
-                # precio (primer seller/item que tenga Price)
-                price = None
-                image_url = None
-                barcode = None
-                for it in (p.get("items") or []):
-                    # ean/ref
+        resp = await ctx.request.get(api, timeout=30000)
+        if not getattr(resp, "ok", False):
+            return []
+
+        data = await resp.json()
+        items: List[Dict[str, Any]] = []
+
+        for p in (data or [])[: max(limit * 3, limit)]:
+            title = p.get("productName") or p.get("productTitle")
+            link_text = p.get("linkText") or p.get("link") or ""
+            url = f"{base_url}/{link_text}/p" if link_text else (p.get("link") or "")
+
+            price: Optional[str] = None
+            image_url: Optional[str] = None
+            barcode: Optional[str] = None
+
+            # recorrer SKUs del producto y tomar la mejor info disponible
+            for it in (p.get("items") or []):
+                # EAN / barcode
+                if not barcode:
+                    # referenceId[].Value
+                    for rid in (it.get("referenceId") or []):
+                        val = rid.get("Value")
+                        if val:
+                            d = re.sub(r"\D", "", str(val))
+                            if 8 <= len(d) <= 14:
+                                barcode = d
+                                break
+                    # ean directo
                     if not barcode:
-                        # 1) value en referenceId
-                        for rid in (it.get("referenceId") or []):
-                            val = rid.get("Value")
-                            if val and 8 <= len(re.sub(r"\D","",val)) <= 14:
-                                barcode = re.sub(r"\D","",val); break
-                        # 2) ean directo
                         ean = it.get("ean")
-                        if not barcode and ean:
-                            d = re.sub(r"\D","", str(ean))
-                            if 8 <= len(d) <= 14: barcode = d
-                    # imagen
-                    if not image_url:
-                        imgs = it.get("images") or []
-                        if imgs:
-                            image_url = imgs[0].get("imageUrl")
-                    # precio
+                        if ean:
+                            d = re.sub(r"\D", "", str(ean))
+                            if 8 <= len(d) <= 14:
+                                barcode = d
+
+                # imagen
+                if not image_url:
+                    imgs = it.get("images") or []
+                    if imgs:
+                        image_url = imgs[0].get("imageUrl")
+
+                # precio (primer seller con Price > 0)
+                if price is None:
                     for seller in (it.get("sellers") or []):
                         co = (seller.get("commertialOffer") or {})
                         pr = co.get("Price")
                         if isinstance(pr, (float, int)) and pr > 0:
                             price = f"ARS {pr:.2f}"
                             break
-                    if price and image_url:
-                        break
-                items.append({
-                    "title": title, "price": price, "url": url,
-                    "image_url": image_url, "barcode": barcode
-                })
-            return items
+
+                # si ya tenemos todo "mínimo útil", podemos dejar de iterar SKUs
+                if barcode and image_url and price:
+                    break
+
+            items.append({
+                "title": title,
+                "price": price,
+                "url": url,
+                "image_url": image_url,
+                "barcode": barcode,
+                "promotions": [],  # para no romper el front
+            })
+
+        return items
+
     except Exception as e:
         print("[LOG] VTEX API error:", e)
-    return []
+        return []
 
 TOP_N = 3
 
@@ -355,7 +387,7 @@ async def dia_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
     page = await ctx.new_page()
     try:
         # 1) API VTEX
-        api_items = await _vtex_api_search(page, base, query, limit)
+        api_items = await _vtex_api_search(ctx, base, query, limit)
         api_items = [it for it in api_items if _title_matches(q_terms, it.get("title"))]
         if api_items:
             return api_items[:limit]
