@@ -175,6 +175,7 @@ async def vtex_api_search_by_ean(base: str, ean: str, limit: int = 3) -> List[Di
                             "url": link,
                             "image_url": image,
                             "barcode": ean,
+                            "promotion": promo_text,
                         })
                     if items:
                         break

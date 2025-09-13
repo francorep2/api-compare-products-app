@@ -1,8 +1,12 @@
 # scrapers_async/carrefour_scraper_async.py
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import json, urllib.parse, re, os, datetime, asyncio
-import re
 
+# ===================== Config =====================
+TOP_N = 3
+CARREFOUR_BASE = "https://www.carrefour.com.ar"  # AR (VTEX)
+
+# ===================== Query helpers =====================
 def _query_terms(q: str) -> list[str]:
     if not q: return []
     return [t for t in re.findall(r"[A-Za-z0-9]{3,}", q.lower())]
@@ -12,6 +16,10 @@ def _title_matches(q_terms: list[str], title: str | None) -> bool:
         return True
     tl = title.lower()
     return any(t in tl for t in q_terms)
+
+def _search_url(query: str) -> str:
+    # VTEX: /busca?ft=<query>
+    return f"{CARREFOUR_BASE}/busca?ft={urllib.parse.quote(query)}"
 
 async def _try_close_banners(page):
     # Cierra banners de cookies/geo (OneTrust, etc.)
@@ -26,80 +34,16 @@ async def _try_close_banners(page):
             if await el.count():
                 await el.click(timeout=1000)
                 await asyncio.sleep(0.2)
-        except: pass
-
-async def _vtex_api_search(page, base_url: str, query: str, limit: int):
-    """Usa VTEX Catalog Search API: /api/catalog_system/pub/products/search/<query>"""
-    api = f"{base_url}/api/catalog_system/pub/products/search/{query}"
-    try:
-        resp = await page.request.get(api, timeout=30000)
-        if resp.ok:
-            data = await resp.json()
-            items = []
-            for p in data[: max(limit*3, limit)]:  # traemos más y luego filtramos
-                title = p.get("productName") or p.get("productTitle")
-                link_text = p.get("linkText") or p.get("link") or ""
-                url = f"{base_url}/{link_text}/p" if link_text else p.get("link") or ""
-                # precio (primer seller/item que tenga Price)
-                price = None
-                image_url = None
-                barcode = None
-                for it in (p.get("items") or []):
-                    # ean/ref
-                    if not barcode:
-                        # 1) value en referenceId
-                        for rid in (it.get("referenceId") or []):
-                            val = rid.get("Value")
-                            if val and 8 <= len(re.sub(r"\D","",val)) <= 14:
-                                barcode = re.sub(r"\D","",val); break
-                        # 2) ean directo
-                        ean = it.get("ean")
-                        if not barcode and ean:
-                            d = re.sub(r"\D","", str(ean))
-                            if 8 <= len(d) <= 14: barcode = d
-                    # imagen
-                    if not image_url:
-                        imgs = it.get("images") or []
-                        if imgs:
-                            image_url = imgs[0].get("imageUrl")
-                    # precio
-                    for seller in (it.get("sellers") or []):
-                        co = (seller.get("commertialOffer") or {})
-                        pr = co.get("Price")
-                        if isinstance(pr, (float, int)) and pr > 0:
-                            price = f"ARS {pr:.2f}"
-                            break
-                    if price and image_url:
-                        break
-                items.append({
-                    "title": title, "price": price, "url": url,
-                    "image_url": image_url, "barcode": barcode
-                })
-            return items
-    except Exception as e:
-        print("[LOG] VTEX API error:", e)
-    return []
-TOP_N = 3
-
-CARREFOUR_BASE = "https://www.carrefour.com.ar"  # AR (VTEX)
-
-
-
-
-# Búsqueda clásica en VTEX: /busca?ft=<query>
-def _search_url(query: str) -> str:
-    return f"{CARREFOUR_BASE}/busca?ft={urllib.parse.quote(query)}"
+        except:
+            pass
 
 # ===================== Utils =====================
-
 def clean_text(s: Optional[str]) -> Optional[str]:
     if not s: return None
-    import re as _re
-    return _re.sub(r"\s+", " ", s).strip()
+    return re.sub(r"\s+", " ", s).strip()
 
 def _digits(s: Optional[str]) -> str:
-    import re as _re
-    return _re.sub(r"\D", "", s or "")
+    return re.sub(r"\D", "", s or "")
 
 def normalize_barcode(s: Optional[str]) -> Optional[str]:
     d = _digits(s)
@@ -113,21 +57,20 @@ def choose_barcode(*cands) -> Optional[str]:
 
 def normalize_price(text: Optional[str]) -> Optional[str]:
     if not text: return None
-    import re as _re
     t = text.replace("\xa0", " ").strip()
     cand = []
-    for ent, dec in _re.findall(r'(?:\$|ARS)\s*([0-9]{1,3}(?:[.\s][0-9]{3})+|[0-9]{4,})(?:,([0-9]{2}))?', t, flags=_re.I):
+    for ent, dec in re.findall(r'(?:\$|ARS)\s*([0-9]{1,3}(?:[.\s][0-9]{3})+|[0-9]{4,})(?:,([0-9]{2}))?', t, flags=re.I):
         ent_clean = ent.replace(".", "").replace(" ", "")
         try: cand.append(float(f"{ent_clean}.{dec or '00'}"))
         except: pass
-    for ent, dec in _re.findall(r'(?:\$|ARS)\s*([0-9]{1,4})\s+([0-9]{2})', t, flags=_re.I):
+    for ent, dec in re.findall(r'(?:\$|ARS)\s*([0-9]{1,4})\s+([0-9]{2})', t, flags=re.I):
         try: cand.append(float(f"{int(ent)}.{dec}"))
         except: pass
-    for ent, dec in _re.findall(r'([0-9]{1,3}(?:[.\s][0-9]{3})*|[0-9]{1,4}),([0-9]{2})', t):
+    for ent, dec in re.findall(r'([0-9]{1,3}(?:[.\s][0-9]{3})*|[0-9]{1,4}),([0-9]{2})', t):
         ent_clean = ent.replace(".", "").replace(" ", "")
         try: cand.append(float(f"{int(ent_clean)}.{dec}"))
         except: pass
-    for ent in _re.findall(r'\b([0-9]{4,})\b', t):
+    for ent in re.findall(r'\b([0-9]{4,})\b', t):
         try: cand.append(float(int(ent)))
         except: pass
     if not cand: return None
@@ -152,7 +95,6 @@ def absolutize(base: str, href: str, current_url: Optional[str] = None) -> str:
     return f"{parts[0]}//{parts[2]}{path}"
 
 # ===================== Parsers =====================
-
 async def parse_jsonld_product(page):
     scripts = page.locator("script[type='application/ld+json']")
     count = await scripts.count()
@@ -166,8 +108,7 @@ async def parse_jsonld_product(page):
                     name = it.get("name")
                     offers = it.get("offers")
                     price = None
-                    if isinstance(offers, list) and offers:
-                        offers = offers[0]
+                    if isinstance(offers, list) and offers: offers = offers[0]
                     if isinstance(offers, dict):
                         p = offers.get("price")
                         if p:
@@ -183,7 +124,8 @@ async def parse_jsonld_product(page):
                         "image": image or None,
                         "barcode": gtin or None,
                     }
-        except: pass
+        except:
+            pass
     return None
 
 async def parse_meta_price_dom(page) -> Optional[str]:
@@ -196,7 +138,7 @@ async def parse_meta_price_dom(page) -> Optional[str]:
                 except: pass
     for cont_sel in ["#skuBestPrice", ".skuBestPrice", ".best-price", ".bestPrice", ".price", ".new-price"]:
         cont = page.locator(cont_sel).first
-        if not await cont.count(): 
+        if not await cont.count():
             continue
         val_el = cont.locator(".val").first
         dec_el = cont.locator(".dec").first
@@ -255,7 +197,7 @@ async def extract_image_url(page) -> Optional[str]:
         src = await el.get_attribute("href")
         if src:
             return absolutize(CARREFOUR_BASE, src)
-    # fallback: primera img con data-*
+    # fallback: primera img
     for sel in ["img[itemprop='image']", ".product-image img", ".image-gallery img", "img"]:
         el = page.locator(sel).first
         if await el.count():
@@ -308,14 +250,263 @@ async def extract_barcode_from_page(page) -> Optional[str]:
     except: pass
     return None
 
-# ===================== PDP & Search =====================
+# ===================== Promos (Carrefour VTEX) =====================
+# Soporta: 3x2, 3×2, 2da al 70%, 50% OFF, etc.
+PROMO_NORMALIZER = re.compile(
+    r"""(?:
+        \b(\d{1,3}\s*%?\s*(?:off|dto|descuento))\b |
+        \b(\d\s*[\*xX×]\s*\d)\b |
+        \b(2da?\s+al\s+\d{1,3}\s*%)\b |
+        \b(segund[ao]\s+al\s+\d{1,3}\s*%)\b |
+        \b(llevando\s+\d+)\b |
+        \b(oferta)\b
+    )""",
+    re.IGNORECASE | re.VERBOSE
+)
 
+def _pick_best_promo_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+    txt = re.sub(r"\s+", " ", text).replace("\xa0", " ").strip()
+    m = PROMO_NORMALIZER.search(txt)
+    if not m:
+        return None
+    hit = m.group(0).upper().strip()
+    hit = hit.replace("DESCUENTO", "DTO").replace("%OFF", "% OFF").replace("  ", " ")
+    hit = hit.replace("×", "x").replace("*", "x")  # normalizar multiplicador
+    return hit
+
+VTEX_PROMO_BADGE_SELECTORS = [
+    "[class*='flagName']", "[class*='flagText']",
+    "[class*='productHighlightText']",
+    "[class*='discountBadge']", "[class*='discount']",
+    "[data-testid*='discount']", "[data-testid*='badge']",
+    ".badge", ".flags", ".tag", ".promo", ".promotion", ".product-flag",
+    ".vtex-product-highlights-2-x-productHighlightText",
+    ".vtex-store-components-3-x-discountInsideContainer",
+    ".vtex-store-components-3-x-productBrandDiscount",
+    ".vtex-product-price-1-x-listPriceValue--hasListPrice",
+]
+
+async def _extract_promos_from_vtex_state(page) -> Optional[str]:
+    """Lee Teasers desde window.__STATE__ cuando existe."""
+    try:
+        has_state = await page.evaluate("() => typeof window.__STATE__ === 'object' && window.__STATE__ !== null")
+        if not has_state:
+            return None
+        teasers_lists = await page.evaluate("""
+            () => {
+              const out = [];
+              try {
+                const S = window.__STATE__ || {};
+                for (const k of Object.keys(S)) {
+                  const v = S[k];
+                  if (v && typeof v === 'object') {
+                    let t = null;
+                    if (v.commertialOffer && Array.isArray(v.commertialOffer.Teasers)) {
+                      t = v.commertialOffer.Teasers;
+                    } else if (Array.isArray(v.sellers)) {
+                      const s0 = v.sellers[0];
+                      if (s0 && s0.commertialOffer && Array.isArray(s0.commertialOffer.Teasers)) {
+                        t = s0.commertialOffer.Teasers;
+                      }
+                    }
+                    if (t) out.push(t);
+                  }
+                }
+              } catch(e) {}
+              return out;
+            }
+        """)
+        names: list[str] = []
+        for arr in (teasers_lists or []):
+            for t in (arr or []):
+                if isinstance(t, dict):
+                    nm = t.get("Name") or t.get("name")
+                    if nm:
+                        best = _pick_best_promo_text(nm) or nm
+                        if best not in names:
+                            names.append(best)
+        if names:
+            return " | ".join(names)
+    except:
+        pass
+    return None
+
+async def extract_promotion_from_dom_vtex(page) -> Optional[str]:
+    """
+    Orden de preferencia:
+      1) window.__STATE__ (Teasers)
+      2) skuJson.skus[].sellers[].commertialOffer.Teasers
+      3) badges en DOM
+      4) patrón en body
+    """
+    s = await _extract_promos_from_vtex_state(page)
+    if s:
+        return s
+
+    # skuJson
+    try:
+        has = await page.evaluate("""
+        () => {
+          try {
+            if (typeof skuJson === 'undefined') return false;
+            const s = (skuJson.skus||[])[0];
+            if (!s) return false;
+            const sell = (s.sellers||[])[0];
+            if (!sell || !sell.commertialOffer) return false;
+            return Array.isArray(sell.commertialOffer.Teasers) && sell.commertialOffer.Teasers.length>0;
+          } catch(e){ return false; }
+        }
+        """)
+        if has:
+            teasers = await page.evaluate("""
+            () => {
+              try {
+                const s = (skuJson.skus||[])[0];
+                const sell = (s.sellers||[])[0];
+                return (sell.commertialOffer?.Teasers||[]).map(t => t && (t.Name || t.name)).filter(Boolean);
+              } catch(e){ return []; }
+            }
+            """)
+            if teasers and isinstance(teasers, list):
+                cleaned = []
+                for t in teasers:
+                    best = _pick_best_promo_text(t) or t
+                    if best and best not in cleaned:
+                        cleaned.append(best)
+                if cleaned:
+                    return " | ".join(cleaned)
+    except:
+        pass
+
+    # Badges DOM
+    try:
+        for sel in VTEX_PROMO_BADGE_SELECTORS:
+            loc = page.locator(sel)
+            if await loc.count():
+                texts = [t.strip() for t in await loc.all_inner_texts() if t.strip()]
+                if texts:
+                    joined = " | ".join(dict.fromkeys(texts))
+                    best = _pick_best_promo_text(joined)
+                    if best:
+                        return best
+    except:
+        pass
+
+    # Fallback body
+    try:
+        body_txt = await page.inner_text("body")
+        best = _pick_best_promo_text(body_txt)
+        if best:
+            return best
+    except:
+        pass
+    return None
+
+def _extract_promo_from_teasers(commertial_offer: dict) -> Optional[str]:
+    """Para la rama API: normaliza Teasers[].Name -> texto simple."""
+    try:
+        teasers = (commertial_offer or {}).get("Teasers") or []
+        names = [t.get("Name") or t.get("name") for t in teasers if isinstance(t, dict) and (t.get("Name") or t.get("name"))]
+        if names:
+            cleaned = []
+            for n in names:
+                best = _pick_best_promo_text(n) or n
+                if best and best not in cleaned:
+                    cleaned.append(best)
+            if cleaned:
+                return " | ".join(cleaned)
+    except Exception as e:
+        print("[LOG] Promo parse error:", e)
+    return None
+
+# ===================== VTEX API search =====================
+async def _vtex_api_search(ctx, base_url: str, query: str, limit: int) -> List[Dict[str, Any]]:
+    """
+    Usa VTEX Catalog Search API (canal sc=3).
+    Extrae: title, url, image, price, barcode y promotion (Teasers).
+    """
+    q = urllib.parse.quote(query or "")
+    api = f"{base_url}/api/catalog_system/pub/products/search/{q}?sc=3"
+    try:
+        resp = await ctx.request.get(api, timeout=30000)
+        if not getattr(resp, "ok", False):
+            return []
+        data = await resp.json()
+        items: List[Dict[str, Any]] = []
+        for p in (data or [])[: max(limit * 4, limit)]:
+            title = p.get("productName") or p.get("productTitle")
+            link_text = p.get("linkText") or p.get("link") or ""
+            url = f"{base_url}/{link_text}/p" if link_text else (p.get("link") or "")
+
+            price: Optional[str] = None
+            image_url: Optional[str] = None
+            barcode: Optional[str] = None
+            promo_text: Optional[str] = None
+
+            for it in (p.get("items") or []):
+                # EAN / barcode
+                if not barcode:
+                    for rid in (it.get("referenceId") or []):
+                        val = (rid or {}).get("Value")
+                        if val:
+                            d = re.sub(r"\D", "", str(val))
+                            if 8 <= len(d) <= 14:
+                                barcode = d
+                                break
+                    if not barcode and it.get("ean"):
+                        d = re.sub(r"\D","", str(it["ean"]))
+                        if 8 <= len(d) <= 14:
+                            barcode = d
+
+                # imagen
+                if not image_url:
+                    imgs = it.get("images") or []
+                    if imgs:
+                        image_url = imgs[0].get("imageUrl")
+
+                # precio + promo
+                for seller in (it.get("sellers") or []):
+                    co = (seller.get("commertialOffer") or {})
+                    pr = co.get("Price")
+                    if isinstance(pr, (float, int)) and pr > 0:
+                        price = f"ARS {pr:.2f}"
+                    if promo_text is None:
+                        promo_text = _extract_promo_from_teasers(co)
+                    if price and promo_text:
+                        break
+
+                if price and image_url and promo_text and barcode:
+                    break
+
+            items.append({
+                "title": title,
+                "price": price,
+                "url": url,
+                "image_url": image_url,
+                "barcode": barcode,
+                "promotion": promo_text,
+            })
+        return items
+    except Exception as e:
+        print("[LOG] VTEX API error:", e)
+    return []
+
+# ===================== PDP =====================
 async def fetch_pdp(ctx, href: str, timeout=60000) -> Dict:
     page = await ctx.new_page()
     try:
         url = absolutize(CARREFOUR_BASE, href)
-        print(f"[LOG] PDP GET {url}")
-        await page.goto(url, wait_until="networkidle", timeout=timeout)
+        await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+
+        # Si nos dejaron en landing de promociones, abortamos
+        current = page.url
+        if "/promociones" in current:
+            print("[LOG] Redirigido a landing de promociones; no es PDP.")
+            return {"title": None, "price": None, "url": current, "image_url": None, "barcode": None, "promotion": None}
+
+        await page.wait_for_load_state("networkidle", timeout=timeout)
         for _ in range(2):
             await page.mouse.wheel(0, 800)
             await asyncio.sleep(0.2)
@@ -327,49 +518,50 @@ async def fetch_pdp(ctx, href: str, timeout=60000) -> Dict:
             if await el.count():
                 t = clean_text(await el.inner_text())
                 if t and len(t) > 2:
-                    title = t
-                    break
+                    title = t; break
 
         # precio (JSON-LD -> metas -> DOM -> regex)
         price = None
         jl = await parse_jsonld_product(page)
         if jl:
             price = jl.get("price") or price
-            if jl.get("title") and not title:
-                title = jl["title"]
+            if jl.get("title") and not title: title = jl["title"]
         if not price: price = await parse_meta_price_dom(page)
         if not price: price = await parse_regex_from_html(page)
         if not title: title = clean_text(await page.title())
 
-        # imagen
         image_url = await extract_image_url(page)
-
-        # barcode (muchas veces NULL en Carrefour VTEX)
         barcode = jl.get("barcode") if jl and jl.get("barcode") else None
-        if not barcode:
-            barcode = await extract_barcode_from_page(page)
+        if not barcode: barcode = await extract_barcode_from_page(page)
 
-        return {"title": title, "price": price, "url": url, "image_url": image_url, "barcode": barcode}
+        # PROMO
+        promotion = await extract_promotion_from_dom_vtex(page)
+
+        return {"title": title, "price": price, "url": url,
+                "image_url": image_url, "barcode": barcode,
+                "promotion": promotion}
     except Exception as e:
         print("[LOG] PDP error Carrefour:", e)
         await save_debug_html(page, "carrefour_pdp_error")
-        return {"title": None, "price": None, "url": href, "image_url": None, "barcode": None}
+        return {"title": None, "price": None, "url": href, "image_url": None, "barcode": None, "promotion": None}
     finally:
         await page.close()
 
+# ===================== Search (top-N / por EAN) =====================
 async def carrefour_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
-    base = "https://www.carrefour.com.ar"
+    base = CARREFOUR_BASE
     q_terms = _query_terms(query)
+
+    # 1) API VTEX primero (más estable, trae Teasers)
+    api_items = await _vtex_api_search(ctx, base, query, limit)
+    api_items = [it for it in api_items if _title_matches(q_terms, it.get("title"))]
+    if api_items:
+        return api_items[:limit]
+
+    # 2) Fallback DOM
     page = await ctx.new_page()
     try:
-        # 1) API VTEX primero
-        api_items = await _vtex_api_search(page, base, query, limit)
-        api_items = [it for it in api_items if _title_matches(q_terms, it.get("title"))]
-        if api_items:
-            return api_items[:limit]
-
-        # 2) Fallback DOM
-        url = f"{base}/busca?ft={urllib.parse.quote(query)}"
+        url = _search_url(query)
         print(f"[LOG] Carrefour search GET {url}")
         await page.goto(url, wait_until="domcontentloaded", timeout=50000)
         await _try_close_banners(page)
@@ -388,7 +580,7 @@ async def carrefour_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Di
             if not href or "/promociones" in href or href.startswith("#"):
                 continue
             pdp = await fetch_pdp(ctx, href)
-            if not pdp.get("url") or pdp["url"] in seen: 
+            if not pdp.get("url") or pdp["url"] in seen:
                 continue
             if not _title_matches(q_terms, pdp.get("title")):
                 continue
@@ -404,7 +596,6 @@ async def carrefour_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Di
         return []
     finally:
         await page.close()
-
 
 async def carrefour_search_by_barcode(ctx, ean: str, limit: int = TOP_N) -> List[Dict]:
     """
@@ -422,7 +613,7 @@ async def carrefour_search_by_barcode(ctx, ean: str, limit: int = TOP_N) -> List
             break
     return out or prelim[:limit]
 
-# API pública
+# ===================== API pública =====================
 async def search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
     return await carrefour_search_top_n(ctx, query, limit=limit)
 

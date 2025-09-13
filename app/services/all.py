@@ -35,6 +35,7 @@ async def search_all_grouped(
                     "url": it.get("url"),
                     "image_url": it.get("image_url"),
                     "barcode": it.get("barcode"),
+                    "promotion": it.get("promotion"),
                 }
                 for it in items
             ]

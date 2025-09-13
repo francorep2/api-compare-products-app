@@ -1,10 +1,17 @@
 # scrapers_async/coto_scraper_async.py
 from typing import List, Dict, Optional
-import json, urllib.parse, re, time, datetime, os
-import asyncio
-import re
-import re
-import unicodedata
+import json, urllib.parse, re, time, datetime, os, asyncio, unicodedata
+
+from scrapers.carrefour_scraper_async import PROMO_NORMALIZER
+
+# ===================== Config =====================
+
+TOP_N = 3
+COTO_BASE = "https://www.cotodigital.com.ar"
+COTO_STATIC_HOST = "https://static.cotodigital3.com.ar"
+COTO_SUCURSAL_ID = 200
+
+# ===================== Texto / matching =====================
 
 def _norm_text(s: str) -> str:
     s = s.lower().strip()
@@ -16,50 +23,39 @@ def _norm_text(s: str) -> str:
 def _title_seems_related(title: str, q: str) -> bool:
     t = _norm_text(title)
     s = _norm_text(q)
-    # must-have tokens (ajustables)
     must = []
     if "cofler" in s: must.append("cofler")
     for k in ("galletita", "galletitas", "cookie", "cookies"):
-        if k in s: 
+        if k in s:
             must.append(k)
             break
-    # opcional: sabor/descriptor
     for k in ("chocolate", "chips"):
         if k in s: must.append(k)
-    # al menos 2 must
     ok = sum(1 for m in must if m in t)
     return ok >= max(2, len(must) - 1)
 
-TOP_N = 3
-
-COTO_BASE = "https://www.cotodigital.com.ar"
-COTO_STATIC_HOST = "https://static.cotodigital3.com.ar"
-COTO_SUCURSAL_ID = 200
-
-# ===================== Utils comunes (quedan sync) =====================
+# ===================== Utils comunes (sync) =====================
 
 def clean_text(s: Optional[str]) -> Optional[str]:
     if not s: return None
-    import re as _re
-    return _re.sub(r"\s+", " ", s).strip()
+    return re.sub(r"\s+", " ", s).strip()
 
 def normalize_price(text: Optional[str]) -> Optional[str]:
     if not text: return None
-    import re as _re
     t = text.replace("\xa0", " ").strip()
     cand = []
-    for ent, dec in _re.findall(r'(?:\$|ARS)\s*([0-9]{1,3}(?:[.\s][0-9]{3})+|[0-9]{4,})(?:,([0-9]{2}))?', t, flags=_re.I):
+    for ent, dec in re.findall(r'(?:\$|ARS)\s*([0-9]{1,3}(?:[.\s][0-9]{3})+|[0-9]{4,})(?:,([0-9]{2}))?', t, flags=re.I):
         ent_clean = ent.replace(".", "").replace(" ", "")
         try: cand.append(float(f"{ent_clean}.{dec or '00'}"))
         except: pass
-    for ent, dec in _re.findall(r'(?:\$|ARS)\s*([0-9]{1,4})\s+([0-9]{2})', t, flags=_re.I):
+    for ent, dec in re.findall(r'(?:\$|ARS)\s*([0-9]{1,4})\s+([0-9]{2})', t, flags=re.I):
         try: cand.append(float(f"{int(ent)}.{dec}"))
         except: pass
-    for ent, dec in _re.findall(r'([0-9]{1,3}(?:[.\s][0-9]{3})*|[0-9]{1,4}),([0-9]{2})', t):
+    for ent, dec in re.findall(r'([0-9]{1,3}(?:[.\s][0-9]{3})*|[0-9]{1,4}),([0-9]{2})', t):
         ent_clean = ent.replace(".", "").replace(" ", "")
         try: cand.append(float(f"{int(ent_clean)}.{dec}"))
         except: pass
-    for ent in _re.findall(r'\b([0-9]{4,})\b', t):
+    for ent in re.findall(r'\b([0-9]{4,})\b', t):
         try: cand.append(float(int(ent)))
         except: pass
     if not cand: return None
@@ -84,8 +80,7 @@ def absolutize(base: str, href: str, current_url: Optional[str] = None) -> str:
     return f"{parts[0]}//{parts[2]}{path}"
 
 def _digits(s: Optional[str]) -> str:
-    import re as _re
-    return _re.sub(r"\D", "", s or "")
+    return re.sub(r"\D", "", s or "")
 
 def normalize_barcode(s: Optional[str]) -> Optional[str]:
     d = _digits(s)
@@ -95,6 +90,180 @@ def choose_barcode(*cands) -> Optional[str]:
     for c in cands:
         d = normalize_barcode(str(c) if c is not None else None)
         if d: return d
+    return None
+
+async def _compute_discount_from_prices(page) -> Optional[str]:
+    """
+    Si no encontramos badge de porcentaje, tratamos de calcularlo con
+    'Precio regular :' y el precio vigente en la PDP.
+    """
+    try:
+        html = await page.content()
+
+        # Buscar 'Precio regular' (Coto muestra: 'Precio regular : $ 6.490,00')
+        m_reg = re.search(
+            r'Precio\s+regular\s*:\s*\$?\s*([\d\.\s]+),(\d{2})',
+            html, flags=re.I
+        )
+        # Buscar precio vigente (la cifra roja grande). Tomamos el MÁXIMO valor con coma.
+        m_all = re.findall(r'\$\s*([\d\.\s]+),(\d{2})', html, flags=re.I)
+
+        if m_reg and m_all:
+            ent_reg, dec_reg = m_reg.group(1), m_reg.group(2)
+            reg = float(ent_reg.replace(".", "").replace(" ", "") + "." + dec_reg)
+
+            # precio actual: tomamos el mayor de los montos encontrados y excluimos el regular si coincide
+            candidates = []
+            for ent, dec in m_all:
+                try:
+                    val = float(ent.replace(".", "").replace(" ", "") + "." + dec)
+                    candidates.append(val)
+                except:
+                    pass
+            if not candidates:
+                return None
+            # El actual suele ser MENOR que el regular; tomamos el menor < regular
+            current = min((v for v in candidates if v < reg), default=None)
+            if current is None:
+                # fallback: si no pudimos, probamos el precio mínimo absoluto
+                current = min(candidates)
+
+            if reg > 0 and current is not None and current < reg:
+                pct = round((reg - current) / reg * 100)
+                if 1 <= pct <= 95:
+                    return f"{pct}% DTO"
+    except Exception:
+        pass
+    return None
+
+
+# ===================== Promos (badges) =====================
+
+PROMO_RE = re.compile(
+    r"""
+    (?P<nxm>\b(?P<n1>\d{1,2})\s*[xX×]\s*(?P<m1>\d{1,2})\b)                                   # 3x2 / 6x4
+    |(?P<llevando>\bllevand[oa]\s+(?P<n2>\d{1,2})\s+(?:pag[aá]s?|paga)\s+(?P<m2>\d{1,2})\b)   # llevando 3 pagás 2
+    |(?P<precio_de>\b(?P<n3>\d{1,2})\s+al\s+precio\s+de\s+(?P<m3>\d{1,2})\b)                 # 3 al precio de 2
+    |(?P<seg_unid>\b(?:2da?|segund[oa])\s+al\s+(?P<pct2>\d{1,3})\s*%?\b)                     # 2da al 70%
+    |(?P<pct>\b(?P<pct1>\d{1,3})\s*%?\s*(?:off|dto|descuento)\b)                             # 20% OFF / 15% dto
+    |(?P<hasta>\bhasta\s+(?P<pcth>\d{1,3})\s*%?\b)                                           # hasta 40%
+    |(?P<llevando_pct>\bllevand[oa]\s+\d{1,2}.*?(?P<pct3>\d{1,3})\s*%.*?(?:2da?|segund[oa])) # llevando 2, 70% en la 2da
+    """,
+    re.IGNORECASE | re.VERBOSE
+)
+GRID_BADGE_SELECTORS = [
+    "[class*='flagName']",
+    "[class*='flagText']",
+    "[class*='productHighlightText']",
+    "[class*='discount']",
+    "[data-testid*='discount']",
+    "[data-testid*='badge']",
+    ".badge", ".flags", ".tag", ".promo", ".promotion", ".product-flag",
+    "span:has-text('OFERTA')", "span:has-text('Dto')", "strong:has-text('OFERTA')"
+]
+
+
+def _pick_best_promo_text(text: str) -> Optional[str]:
+    """Compakta y normaliza a '3x2', '2da al 70%', '15% DTO', etc."""
+    if not text:
+        return None
+    txt = re.sub(r"\s+", " ", text).strip()
+    m = PROMO_NORMALIZER.search(txt)
+    if not m:
+        return None
+    hit = m.group(0).upper().replace("  ", " ").strip()
+    # normalizaciones mínimas
+    hit = hit.replace("DESCUENTO", "DTO").replace("%OFF", "% OFF")
+    return hit
+
+async def extract_promotion_from_dom_page(page) -> Optional[str]:
+    """
+    Busca en PDP de Coto (badges, cintillos cerca del precio) y trata de
+    capturar específicamente el % de descuento si existe.
+    Si no lo encuentra, intenta calcularlo con los precios.
+    """
+    # 1) inspeccionamos contenedores típicos y sus vecinos
+    COTO_BADGE_SELECTORS = [
+        ".promo", ".promotion", ".badge", ".flags", ".product-flag", ".ribbon",
+        "[class*='promo']", "[class*='Promotion']", "[class*='badge']",
+        ".descuento", ".beneficio", ".ahorro", ".etiqueta", ".label",
+        ".tag", ".tag-oferta", ".tag-descuento", ".product__badge",
+        ".prod__promo", ".prod__flag", ".product-promotion",
+        "span:has-text('OFERTA')", "strong:has-text('OFERTA')", "span:has-text('Dto')"
+    ]
+
+    def _try_pick(txts: list[str]) -> Optional[str]:
+        txt = " | ".join(t for t in txts if t)
+        # ¿hay un % explícito?
+        m_pct = re.search(r'\b(\d{1,3})\s*%', txt, flags=re.I)
+        if m_pct:
+            return f"{m_pct.group(1)}% DTO"
+        # si no, usar el normalizador general
+        best = _pick_best_promo_text(txt)
+        return best
+
+    # A) Selectores directos + atributos
+    for sel in COTO_BADGE_SELECTORS:
+        try:
+            loc = page.locator(sel)
+            if await loc.count():
+                texts = [t.strip() for t in await loc.all_inner_texts() if t and t.strip()]
+                # también probar atributos aria-label / title del primer match
+                try:
+                    first = loc.first
+                    for attr in ("aria-label", "title"):
+                        val = await first.get_attribute(attr)
+                        if val: texts.append(val.strip())
+                except:
+                    pass
+                promo = _try_pick(texts)
+                if promo:
+                    return promo
+        except:
+            continue
+
+    # B) Vecindario del precio (algunos templates ponen el % junto al precio)
+    try:
+        price_zone = page.locator("xpath=//*[contains(@class,'price') or contains(@class,'precio') or contains(@class,'product-price')][1]")
+        if await price_zone.count():
+            texts = [t.strip() for t in await price_zone.all_inner_texts() if t and t.strip()]
+            promo = _try_pick(texts)
+            if promo:
+                return promo
+    except:
+        pass
+
+    # C) Fallback fuerte: calcular desde 'Precio regular :' y el precio vigente
+    calc = await _compute_discount_from_prices(page)
+    if calc:
+        return calc
+
+    # D) Último recurso: todo el body
+    try:
+        body_txt = await page.inner_text("body")
+        return _try_pick([body_txt])
+    except:
+        return None
+
+
+async def extract_promotion_from_card(card_locator) -> Optional[str]:
+    """Lee promo en la tarjeta del grid."""
+    try:
+        card = card_locator.locator("xpath=ancestor::*[contains(@class,'product') or contains(@class,'summary') or contains(@class,'grid')][1]")
+    except:
+        card = card_locator
+    for sel in GRID_BADGE_SELECTORS:
+        try:
+            loc = card.locator(sel)
+            if await loc.count():
+                texts = [t.strip() for t in await loc.all_inner_texts() if t.strip()]
+                if texts:
+                    compact = " | ".join(dict.fromkeys(texts))
+                    best = _pick_best_promo_text(compact)
+                    if best:
+                        return best
+        except:
+            continue
     return None
 
 # ===================== Parsers async =====================
@@ -129,7 +298,8 @@ async def parse_jsonld_product(page):
                         "image": image or None,
                         "barcode": gtin or None,
                     }
-        except: pass
+        except:
+            pass
     return None
 
 async def parse_meta_price_dom(page) -> Optional[str]:
@@ -142,7 +312,7 @@ async def parse_meta_price_dom(page) -> Optional[str]:
                 except: pass
     for cont_sel in ["#skuBestPrice", ".skuBestPrice", ".best-price", ".bestPrice", ".price", ".new-price"]:
         cont = page.locator(cont_sel).first
-        if not await cont.count(): 
+        if not await cont.count():
             continue
         val_el = cont.locator(".val").first
         dec_el = cont.locator(".dec").first
@@ -166,7 +336,8 @@ async def parse_meta_price_dom(page) -> Optional[str]:
                 for s in (data.get("skus") or []):
                     bp = s.get("bestPrice")
                     if bp: return f"ARS {float(bp)/100:.2f}"
-    except: pass
+    except:
+        pass
     return None
 
 async def parse_regex_from_html(page) -> Optional[str]:
@@ -310,6 +481,7 @@ async def fetch_coto_pdp(ctx, href, timeout=60000) -> Dict:
         url = sanitize_coto_href(url)
         print(f"[LOG] PDP GET {url}")
         await page.goto(url, wait_until="networkidle", timeout=timeout)
+
         for _ in range(2):
             await page.mouse.wheel(0, 800)
             await asyncio.sleep(0.2)
@@ -339,28 +511,47 @@ async def fetch_coto_pdp(ctx, href, timeout=60000) -> Dict:
         image_url = await extract_image_url(page, url)
 
         # barcode
-        barcode = None
-        if jl and jl.get("barcode"):
-            barcode = jl["barcode"]
+        barcode = jl.get("barcode") if jl and jl.get("barcode") else None
         if not barcode:
             barcode = await extract_barcode_from_datalayer_or_html(page)
 
-        return {"title": title, "price": price, "url": url, "image_url": image_url, "barcode": barcode}
+        # promoción (badges/texto en PDP)
+        promotion = await extract_promotion_from_dom_page(page)
+
+        return {
+            "title": title,
+            "price": price,
+            "url": url,
+            "image_url": image_url,
+            "barcode": barcode,
+            "promotion": promotion,
+        }
     except Exception as e:
         print("[LOG] PDP error Coto:", e)
         await save_debug_html(page, "coto_pdp_error")
-        return {"title": None, "price": None, "url": href, "image_url": None, "barcode": None}
+        return {"title": None, "price": None, "url": href, "image_url": None, "barcode": None, "promotion": None}
     finally:
         await page.close()
 
 async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
-    search_url = f"{COTO_BASE}/sitios/cdigi/categoria?_dyncharset=utf-8&Dy=1&Ntt={urllib.parse.quote(query)}&idSucursal={COTO_SUCURSAL_ID}"
+    """
+    Busca en Coto (clásico) y devuelve top-N items.
+    - Lee HREFs de la grilla.
+    - Extrae promo en la CARD (badge) y la usa como fallback si la PDP no trae nada.
+    - Dedup por URL final.
+    """
+    search_url = (
+        f"{COTO_BASE}/sitios/cdigi/categoria"
+        f"?_dyncharset=utf-8&Dy=1&Ntt={urllib.parse.quote(query)}&idSucursal={COTO_SUCURSAL_ID}"
+    )
+
     page = await ctx.new_page()
     try:
         print(f"[LOG] Coto classic GET {search_url}")
         resp = await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
         print(f"[LOG] Classic status: {resp.status if resp else 'N/A'} | title: {await page.title()}")
 
+        # intentar que cargue todo el grid
         try:
             await page.wait_for_load_state("networkidle", timeout=6000)
         except:
@@ -370,6 +561,7 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
             await page.mouse.wheel(0, 1200)
             await asyncio.sleep(0.25)
 
+        # 1) levantar anchors del grid
         anchors = None
         try:
             anchors = page.locator("a[href*='/sitios/cdigi/productos/']")
@@ -377,56 +569,63 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
         except:
             total = 0
 
-        if not total:
-            try:
-                await page.wait_for_selector("a[href*='/sitios/cdigi/productos/']", state="attached", timeout=4000)
-                anchors = page.locator("a[href*='/sitios/cdigi/productos/']")
-                total = await anchors.count()
-            except:
-                total = 0
-
-        hrefs: list[str] = []
-        titles: list[str] = []
+        hrefs_with_cardpromo: List[tuple[str, Optional[str]]] = []
 
         if total:
-            take = min(total, max(24, limit*8))
+            take = min(total, max(24, limit * 8))
             for i in range(take):
                 a = anchors.nth(i)
-                href = await a.get_attribute("href") or ""
-                title = await a.inner_text() or ""
-                if href and href not in hrefs:
-                    hrefs.append(href)
-                    titles.append(title)
+                href = (await a.get_attribute("href")) or ""
+                if not href:
+                    continue
+                # promo de la tarjeta (si hay badge)
+                card_promo = None
+                try:
+                    card_promo = await extract_promotion_from_card(a)
+                except:
+                    card_promo = None
+                hrefs_with_cardpromo.append((href, card_promo))
         else:
+            # 2) fallback: parsear HTML manualmente (sin promo de card)
             html = await page.content()
             found = re.findall(r'href="([^"]+/sitios/cdigi/productos/[^"]+)"', html, flags=re.I)
             for h in found:
-                if h not in hrefs:
-                    hrefs.append(h)
-                    titles.append("")
+                hrefs_with_cardpromo.append((h, None))
 
-        print(f"[LOG] Anchors producto: {len(hrefs)}")
+        if not hrefs_with_cardpromo:
+            await save_debug_html(page, "coto_classic_empty")
+            return []
 
-        results, seen = [], set()
-        for href in hrefs:
+        # 3) visitar PDPs y armar resultados
+        results: List[Dict] = []
+        seen: set[str] = set()
+
+        for href, card_promo in hrefs_with_cardpromo:
             pdp = await fetch_coto_pdp(ctx, href)
-            if not pdp.get("url") or pdp["url"] in seen:
+            final_url = pdp.get("url") or sanitize_coto_href(absolutize(COTO_BASE, href))
+            if not final_url or final_url in seen:
                 continue
-            seen.add(pdp["url"])
+
+            # si la PDP no trajo promo, usar la de la card
+            if pdp.get("promotion") is None and card_promo:
+                pdp["promotion"] = card_promo
+
+            seen.add(final_url)
             results.append(pdp)
-            if len(results) == limit:
+            if len(results) >= limit:
                 break
 
         if not results:
-            await save_debug_html(page, "coto_classic_empty")
+            await save_debug_html(page, "coto_classic_no_matches")
+
         return results[:limit]
+
     except Exception as e:
         print("[LOG] Classic search error:", e)
         await save_debug_html(page, "coto_classic_error")
         return []
     finally:
         await page.close()
-
 
 # ===================== Búsqueda por barcode =====================
 
@@ -441,7 +640,8 @@ async def coto_search_by_barcode(ctx, ean: str, limit: int = TOP_N) -> List[Dict
             break
     return out or prelim[:limit]
 
-# API pública del scraper
+# ===================== API pública del scraper =====================
+
 async def search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
     return await coto_search_top_n(ctx, query, limit=limit)
 
