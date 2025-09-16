@@ -1,3 +1,4 @@
+# scrapers/jumbo_scraper_async.py
 import re
 import json
 from typing import List, Dict, Optional
@@ -5,6 +6,8 @@ from app.models.search_item import SearchItem
 
 BARCODE_PAT = re.compile(r"\b(\d{8,14})\b")
 NUM_RE = re.compile(r"\d")
+RE_SECOND = re.compile(r"(2da|2do|2ª|2°|segunda)\s+.*\s+(\d{1,3})%", re.IGNORECASE)
+RE_ANY_PCT = re.compile(r"(-?\s*\d{1,3}\s*%)")
 
 def _only_digits(s: str) -> Optional[str]:
     d = re.sub(r"\D", "", s or "")
@@ -20,8 +23,7 @@ def _clean_price_text(text: str) -> Optional[float]:
     if not text:
         return None
     t = (text.replace("\xa0", " ").replace("\u00a0", " ").replace("ARS", "").replace("$", ""))
-    t = t.replace(" ", "")
-    t = t.replace(".", "").replace(",", ".")
+    t = t.replace(" ", "").replace(".", "").replace(",", ".")
     t = re.sub(r"[^\d.]", "", t)
     try:
         return float(t) if t else None
@@ -29,51 +31,53 @@ def _clean_price_text(text: str) -> Optional[float]:
         return None
 
 async def _promo_from_dom(root) -> Optional[str]:
+    """
+    Versión final que extrae correctamente solo el texto de la promoción,
+    evitando que se mezcle con el precio u otros datos.
+    """
+    # Las definiciones de Regex se mantienen igual
+    RE_SECOND = re.compile(r"(2da|2do|2ª|2°|segunda)\s+.*\s+\d{1,3}%", re.IGNORECASE)
+    RE_ANY_PCT = re.compile(r"(-?\s*\d{1,3}\s*%)")
+
+    selector = '[title*="%"], [class*="promotion"], [class*="discount"], [class*="flag"], span'
     try:
-        found = await root.evaluate("""
-            (el) => {
-              const container = el && el.querySelector ? el : document;
-              const ATTRS = ['title','aria-label','data-title','data-tooltip','data-promotion','data-teaser-name','alt'];
-              const reMinus = /[\\u2212\\u2013-]\\s*\\d{1,3}\\s*%/;
-              const reSecond = /(?:\\b(?:2da|2do|2ª|2°|segunda)\\b(?:\\s+(?:unidad(?:es)?|unid\\.?|ud\\.?|u\\.?|und\\.?))?\\s+(?:al|a)\\s*\\d{1,3}\\s*%)/i;
-              const reAny = /\\d{1,3}\\s*%/;
-              const all = container.querySelectorAll('*');
-              for (const n of all) {
-                for (const a of ATTRS) {
-                  const v = n.getAttribute && n.getAttribute(a);
-                  if (v) {
-                    const m = v.match(reMinus) || v.match(reSecond) || v.match(reAny);
-                    if (m) return m[0];
-                  }
-                }
-                const t = (n.textContent||'').trim();
-                if (!t) continue;
-                const m = t.match(reMinus) || t.match(reSecond) || t.match(reAny);
-                if (m) return m[0];
-              }
-              return null;
-            }
-        """)
-        if found:
-            return found.replace("−", "-").replace("–", "-").replace(" ", "")
-    except:
-        pass
+        elements = await root.query_selector_all(selector)
+        for el in elements:
+            # Estrategia 1: Revisar el atributo 'title'
+            title = await el.get_attribute("title")
+            if title and "%" in title:
+                match_second = RE_SECOND.search(title)
+                if match_second:
+                    # EXTRAE solo la parte que coincide con la promoción
+                    return match_second.group(0).strip()
+                
+                match_pct = RE_ANY_PCT.search(title)
+                if match_pct:
+                    return match_pct.group(1).replace(" ", "")
+
+            # Estrategia 2: Revisar el texto interno
+            text = (await el.inner_text() or "").strip()
+            if text and "%" in text:
+                match_second = RE_SECOND.search(text)
+                if match_second:
+                    # EXTRAE solo la parte que coincide con la promoción
+                    return match_second.group(0).strip()
+
+                match_pct = RE_ANY_PCT.search(text)
+                if match_pct:
+                    return match_pct.group(1).replace(" ", "")
+    except Exception:
+        return None
     return None
 
 async def _collect_prices_from_root(root) -> Dict[str, float]:
     out: Dict[str, float] = {}
     try:
         nodes = await root.query_selector_all(
-            ".vtex-product-price-1-x-sellingPriceValue, "
-            ".vtex-product-price-1-x-sellingPrice, "
-            "[class*='sellingPriceValue'], "
-            "[class*='sellingPrice'], "
-            "[class*='vtex-price-format'], "
-            ".vtex-product-price-1-x-currencyContainer, "
-            "[data-testid*='price'], "
-            ".vtex-product-price-1-x-listPriceValue, "
-            ".vtex-product-price-1-x-listPrice, "
-            "[class*='listPrice']"
+            ".vtex-product-price-1-x-sellingPriceValue, .vtex-product-price-1-x-sellingPrice, "
+            "[class*='sellingPriceValue'], [class*='sellingPrice'], [class*='vtex-price-format'], "
+            ".vtex-product-price-1-x-currencyContainer, [data-testid*='price'], "
+            ".vtex-product-price-1-x-listPriceValue, .vtex-product-price-1-x-listPrice, [class*='listPrice']"
         )
         sells, lists = [], []
         for n in nodes:
@@ -111,10 +115,8 @@ async def _pdp_price_from_dom(page) -> Optional[float]:
         return v
     try:
         wrappers = await page.query_selector_all(
-            ".vtex-product-price-1-x-sellingPrice, "
-            ".vtex-product-price-1-x-sellingPriceValue, "
-            ".vtex-product-price-1-x-priceContainer, "
-            "[class*='sellingPrice']"
+            ".vtex-product-price-1-x-sellingPrice, .vtex-product-price-1-x-sellingPriceValue, "
+            ".vtex-product-price-1-x-priceContainer, [class*='sellingPrice']"
         )
         for w in wrappers:
             cls = (await w.get_attribute("class") or "").lower()
@@ -133,51 +135,56 @@ async def _pdp_price_from_dom(page) -> Optional[float]:
     except:
         pass
     return None
-
 async def _price_from_card_dom(card) -> Optional[float]:
-    v = await _best_selling_from_root(card)
-    if v:
-        return v
+    """
+    Obtiene el precio correcto, manejando tanto la estructura de precio
+    simple como la de precio con descuento.
+    """
     try:
-        wrappers = await card.query_selector_all(
-            ".vtex-product-price-1-x-sellingPrice, "
-            ".vtex-product-price-1-x-sellingPriceValue, "
-            ".vtex-product-price-1-x-priceContainer, "
-            "[class*='sellingPrice']"
-        )
-        for w in wrappers:
-            cls = (await w.get_attribute("class") or "").lower()
-            if "listprice" in cls:
-                continue
-            int_el = await w.query_selector("[class*='currencyInteger']")
-            frac_el = await w.query_selector("[class*='currencyFraction']")
-            dec_el = await w.query_selector("[class*='currencyDecimal']")
-            int_txt = (await int_el.inner_text()).strip() if int_el else ""
-            frac_txt = (await frac_el.inner_text()).strip() if frac_el else ""
-            dec_txt = (await dec_el.inner_text()).strip() if dec_el else ","
-            composed = f"{int_txt}{dec_txt}{frac_txt}".strip()
-            val = _clean_price_text(composed)
-            if val and val > 0:
-                return val
-    except:
-        pass
-    return None
+        # --- ESTRATEGIA 1: Buscar el precio en la estructura simple (ej: $3.217,5) ---
+        price_el = await card.query_selector('[class*="vtex-price-format-gallery"]')
+        if price_el:
+            price_text = (await price_el.inner_text() or "").strip()
+            price = _clean_price_text(price_text)
+            if price and price > 0:
+                return price
 
+        # --- ESTRATEGIA 2 (Fallback): Buscar en la estructura con selling/list price ---
+        # Esto es para los productos con descuento visible (precio tachado).
+        selling_price_el = await card.query_selector('div[class*="sellingPrice"]:not([class*="listPrice"])')
+        if selling_price_el:
+            price_text = await selling_price_el.inner_text()
+            price = _clean_price_text(price_text)
+            if price and price > 0:
+                return price
+
+    except Exception:
+        return None
+    return None
 async def _barcode_from_visible(page) -> Optional[str]:
-    for sel in [
-        ".vtex-product-identifier-0-x-product-identifier__value",
-        "[class*='product-identifier__value']",
-        ".vtex-product-identifier-0-x-product-identifier",
-        "[data-testid*='product-identifier'] span",
-    ]:
-        try:
-            el = await page.query_selector(sel)
-            if el:
-                d = _only_digits((await el.inner_text()).strip())
-                if d and 12 <= len(d) <= 14:
-                    return d
-        except:
-            pass
+    """
+    Versión corregida que extrae el identificador del producto (SKU)
+    del 'span' específico que indicaste, con una validación más flexible.
+    """
+    try:
+        # Usamos el selector exacto que nos proporcionaste, es la fuente más fiable.
+        selector = "span.vtex-product-identifier-0-x-product-identifier__value"
+        
+        element = await page.query_selector(selector)
+        if element:
+            text_content = (await element.inner_text() or "").strip()
+            identifier = _only_digits(text_content)
+            
+            # --- VALIDACIÓN CORREGIDA ---
+            # Aceptamos el identificador si tiene 5 o más dígitos,
+            # lo cual es una regla más adecuada para un SKU.
+            if identifier and len(identifier) >= 5:
+                return identifier
+                
+    except Exception:
+        # Si ocurre cualquier error, no devolvemos nada.
+        return None
+        
     return None
 
 async def _barcode_from_ld_json(page) -> Optional[str]:
@@ -194,79 +201,93 @@ async def _barcode_from_ld_json(page) -> Optional[str]:
                         objs.append(json.loads(m.group(0)))
                     except:
                         pass
+            
             for obj in objs:
                 for o in (obj if isinstance(obj, list) else [obj]):
                     if isinstance(o, dict) and (o.get("@type", "").lower() == "product"):
-                        for k in ("gtin13", "gtin", "gtin12", "sku"):
+                        # --- LÓGICA MEJORADA ---
+                        # 1. Buscar explícitamente por GTIN o EAN, que son los correctos.
+                        for k in ("gtin13", "gtin14", "gtin", "ean"):
                             v = o.get(k)
                             d = _only_digits(str(v)) if v else None
                             if d and 12 <= len(d) <= 14:
                                 return d
+                        # 2. Se evita usar "sku", ya que es una causa común de errores.
+                        #    El SKU es un código interno, no el código de barras universal.
+                        # -----------------------
     except:
         pass
     return None
-
 async def _barcode_from_vtex_state(page) -> Optional[str]:
     try:
         st_json = await page.evaluate("() => { try { return JSON.stringify(window.__STATE__||null) } catch(e){ return null } }")
         if not st_json:
             return None
+        
         st = json.loads(st_json)
-        found = None
+        candidates = []
+
         def walk(o):
-            nonlocal found
-            if found:
-                return
             if isinstance(o, dict):
+                # Extraer todos los valores que parezcan EAN/GTIN
                 for k, v in o.items():
                     lk = str(k).lower()
-                    if any(x in lk for x in ["ean", "gtin", "barcode"]):
+                    # --- LÓGICA MEJORADA ---
+                    # Prioriza claves que son explícitamente 'ean' o 'gtin'
+                    if any(x in lk for x in ["ean", "gtin"]):
                         d = _only_digits(str(v))
                         if d and 12 <= len(d) <= 14:
-                            found = d
-                            return
-                    if lk in ("referenceid", "referenceids") and isinstance(v, list):
-                        for it in v:
-                            if isinstance(it, dict):
-                                vv = it.get("Value") or it.get("value")
-                                d = _only_digits(str(vv)) if vv else None
-                                if d and 12 <= len(d) <= 14:
-                                    found = d
-                                    return
+                            # Le da más prioridad si la clave es EXACTA
+                            priority = 1 if lk in ("ean", "gtin") else 2
+                            candidates.append((priority, d))
+
                     if isinstance(v, (dict, list)):
                         walk(v)
             elif isinstance(o, list):
                 for it in o:
                     walk(it)
+        
         walk(st)
-        return found
+
+        if not candidates:
+            return None
+        
+        # Ordena los candidatos por prioridad (los más específicos primero)
+        candidates.sort()
+        return candidates[0][1]
+
     except:
         return None
-
 async def _resolve_barcode_from_detail(ctx, product_url: str) -> Optional[str]:
+    """
+    Versión final que PRIORIZA la búsqueda del SKU visible en la página
+    antes de buscar el código de barras EAN en los datos estructurados.
+    """
+    if not product_url:
+        return None
+
     dpage = await ctx.new_page()
     try:
-        await dpage.goto(product_url, timeout=45000)
-        try:
-            await dpage.wait_for_load_state("domcontentloaded", timeout=15000)
-        except:
-            pass
-        bc = (
-            await _barcode_from_visible(dpage)
+        await dpage.goto(product_url, timeout=45000, wait_until="domcontentloaded")
+
+        # --- ORDEN DE BÚSQUEDA CORREGIDO ---
+        # 1. Primero, busca el identificador visible (SKU) que nos indicaste.
+        #    Esta es ahora la máxima prioridad.
+        # 2. Si no lo encuentra, como plan B, busca el código de barras EAN/GTIN
+        #    en los datos estructurados de la página.
+        
+        barcode = (
+            await _barcode_from_visible(dpage)      # <<< AHORA ESTÁ PRIMERO
             or await _barcode_from_ld_json(dpage)
             or await _barcode_from_vtex_state(dpage)
         )
-        if bc:
-            return bc
-        try:
-            html = await dpage.content()
-            m = BARCODE_PAT.search(html)
-            if m:
-                d = m.group(1)
-                if 12 <= len(d) <= 14:
-                    return d
-        except:
-            pass
+
+        if barcode:
+            return barcode
+
+        return None
+
+    except Exception:
         return None
     finally:
         await dpage.close()
@@ -275,106 +296,97 @@ async def search(ctx, q: Optional[str] = None, barcode: Optional[str] = None, li
     query = (q or barcode or "").strip()
     if not query:
         return []
+
     base = "https://www.jumbo.com.ar"
     url = f"{base}/{query}?_q={query}&map=ft"
     page = await ctx.new_page()
-    await page.goto(url, timeout=45000)
+
     try:
+        
+        await page.goto(url, timeout=55000)
         await page.wait_for_load_state("domcontentloaded", timeout=15000)
-    except:
-        pass
-    try:
-        await page.wait_for_load_state("networkidle", timeout=12000)
-    except:
-        pass
-    items: List[Dict] = []
-    cards = await page.query_selector_all(
-        ".vtex-product-summary-2-x-container, "
-        ".vtex-product-summary-2-x-element, "
-        "[data-testid*='product-summary'], "
-        "[class*='productSummary']"
-    )
-    if not cards:
-        title = None
+
+        # --- ESPERA INTELIGENTE ---
+        # Espera a que los elementos dinámicos (promociones) carguen.
+        # Si no aparecen en 5 segundos, continúa (para productos sin descuento).
         try:
-            h1 = await page.query_selector("h1, [data-testid*='product-name'], [class*='productName']")
-            title = (await h1.inner_text()).strip() if h1 else None
+            promo_selector = '[title*="%"], [class*="discount"]'
+            await page.wait_for_selector(promo_selector, timeout=8000)
         except:
             pass
-        image_url = None
-        try:
-            img = await page.query_selector("picture img, img")
-            image_url = await img.get_attribute("src") if img else None
-        except:
-            pass
-        selling = await _pdp_price_from_dom(page)
-        promotion = await _promo_from_dom(page)
-        barcode_val = await _resolve_barcode_from_detail(ctx, page.url)
-        items.append(
-            SearchItem(
-                title=title,
-                price=_to_ars(selling),
-                url=page.url,
-                image_url=image_url,
-                barcode=barcode_val,
-                promotion=promotion,
-            ).dict()
+        # -------------------------
+
+        items: List[Dict] = []
+        
+        # Selector robusto para las tarjetas de producto
+        card_selector = (
+            ".vtex-product-summary-2-x-container, .vtex-search-result-3-x-galleryItem, "
+            "[class*='product-summary'], [class*='galleryItem']"
         )
-        await page.close()
-        return items
-    for card in cards[:limit]:
-        href = None
-        for sel in ["a.vtex-product-summary-2-x-clearLink", "a"]:
-            a = await card.query_selector(sel)
-            if a:
-                href = await a.get_attribute("href")
-                if href:
-                    break
-        full_url = f"{base}{href}" if href and href.startswith("/") else (href or None)
-        title = None
-        for sel in [
-            ".vtex-product-summary-2-x-productBrand",
-            ".vtex-store-components-3-x-productBrand",
-            ".vtex-product-summary-2-x-productNameContainer",
-            "[data-testid*='product-name']",
-            "[class*='productBrand']",
-        ]:
-            el = await card.query_selector(sel)
-            if el:
-                try:
-                    title = (await el.inner_text()).strip()
-                    if title:
-                        break
-                except:
-                    pass
-        image_url = None
-        for img_sel in ["picture img", "img"]:
-            img = await card.query_selector(img_sel)
-            if img:
-                image_url = (
-                    await img.get_attribute("data-src")
-                    or await img.get_attribute("srcset")
-                    or await img.get_attribute("src")
+        cards = await page.query_selector_all(card_selector)
+
+        # Si 'cards' está vacío, podría ser una página de producto único
+        if not cards:
+            title_el = await page.query_selector("h1, .vtex-store-components-3-x-productName")
+            title = (await title_el.inner_text()).strip() if title_el else None
+
+            # Si hay título, asumimos que es una página de producto
+            if title:
+                img_el = await page.query_selector(".vtex-store-components-3-x-productImage img")
+                image_url = await img_el.get_attribute("src") if img_el else None
+                
+                # Usamos las funciones corregidas aquí también
+                selling_price = await _pdp_price_from_dom(page) # Asumiendo que tienes una función para PDP
+                promotion = await _promo_from_dom(page)
+                barcode_val = await _resolve_barcode_from_detail(ctx, page.url)
+
+                items.append(
+                    SearchItem(
+                        title=title,
+                        price=_to_ars(selling_price),
+                        url=page.url,
+                        image_url=image_url,
+                        barcode=barcode_val,
+                        promotion=promotion,
+                    ).dict()
                 )
-                if image_url:
-                    break
-        selling = await _price_from_card_dom(card)
-        promotion = await _promo_from_dom(card)
-        barcode_val = None
-        if full_url:
-            try:
-                barcode_val = await _resolve_barcode_from_detail(ctx, full_url)
-            except:
-                barcode_val = None
-        items.append(
-            SearchItem(
-                title=title,
-                price=_to_ars(selling),
-                url=full_url,
-                image_url=image_url,
-                barcode=barcode_val,
-                promotion=promotion,
-            ).dict()
-        )
-    await page.close()
-    return items
+            return items
+
+        # Bucle para procesar las tarjetas de producto encontradas
+        for card in cards[:limit]:
+            href_el = await card.query_selector("a")
+            href = await href_el.get_attribute("href") if href_el else None
+            full_url = f"{base}{href}" if href and href.startswith("/") else (href or None)
+
+            title_el = await card.query_selector(".vtex-product-summary-2-x-productBrand")
+            title = (await title_el.inner_text()).strip() if title_el else None
+            
+            img_el = await card.query_selector("img")
+            image_url = await img_el.get_attribute("src") if img_el else None
+
+            # Llamadas a las funciones optimizadas
+            selling = await _price_from_card_dom(card)
+            promotion = await _promo_from_dom(card)
+            
+            barcode_val = None
+            if full_url:
+                try:
+                    barcode_val = await _resolve_barcode_from_detail(ctx, full_url)
+                except:
+                    barcode_val = None
+
+            items.append(
+                SearchItem(
+                    title=title,
+                    price=_to_ars(selling),
+                    url=full_url,
+                    image_url=image_url,
+                    barcode=barcode_val,
+                    promotion=promotion,
+                ).dict()
+            )
+            
+        return items
+
+    finally:
+        await page.close()
