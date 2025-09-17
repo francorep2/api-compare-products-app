@@ -2,10 +2,10 @@
 
 import json
 import re
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from urllib.parse import quote
 from bs4 import BeautifulSoup
-from playwright.async_api import BrowserContext, TimeoutError
+from playwright.async_api import BrowserContext, TimeoutError # <-- SE AGREGÓ BROWSERCONTEXT AQUÍ
 import asyncio
 
 # --- HELPER DEFINITIVO PARA EXTRAER BARCODE DESDE __STATE__ ---
@@ -18,41 +18,31 @@ def _get_barcode_from_state(state_data: Dict, product_id: str) -> Optional[str]:
         return None
         
     try:
-        # 1. La clave del producto principal siempre sigue este patrón.
         product_key = f"Product:sp-{product_id}-none"
         product_obj = state_data.get(product_key)
-        if not product_obj:
-            return None
+        if not product_obj: return None
 
-        # 2. La clave de los 'items' puede variar, la buscamos dinámicamente.
         items_key = next((k for k in product_obj if k.startswith("items(")), None)
-        if not items_key:
-            return None
+        if not items_key: return None
 
-        # 3. Dentro de 'items' está la referencia al objeto del SKU, la clave es 'id'.
         item_ref_id = product_obj[items_key][0].get("id")
-        if not item_ref_id:
-            return None
+        if not item_ref_id: return None
 
-        # 4. Usamos esa referencia para encontrar el objeto del SKU en el __STATE__.
         item_data = state_data.get(item_ref_id)
-        if not item_data:
-            return None
+        if not item_data: return None
 
-        # 5. ¡Extraemos el EAN!
         barcode = item_data.get("ean")
         return barcode if isinstance(barcode, str) else None
         
     except (KeyError, IndexError, TypeError, StopIteration):
-        # Si alguna de las claves no existe, devuelve None de forma segura.
         return None
 
 # --- FUNCIÓN PRINCIPAL DE BÚSQUEDA ---
 
-async def search(ctx: BrowserContext, q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> Dict[str, Any]:
+async def search(ctx: BrowserContext, q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
     search_term = barcode or q
     if not search_term:
-        return {"source": "carrefour", "items": []}
+        return []
 
     page = await ctx.new_page()
     items_list = []
@@ -80,7 +70,6 @@ async def search(ctx: BrowserContext, q: Optional[str] = None, barcode: Optional
         product_elements = soup.select(f"{gallery_selector} section[class*='vtex-product-summary']")
         
         for product_el in product_elements[:limit]:
-            # --- Título (con selectores de respaldo) ---
             title = None
             title_selectors = ["span[class*='productBrandName']", "h3[class*='productNameContainer']"]
             for sel in title_selectors:
@@ -115,10 +104,10 @@ async def search(ctx: BrowserContext, q: Optional[str] = None, barcode: Optional
             })
             
     except Exception as e:
-        print(f"Ocurrió un error inesperado: {e}")
+        print(f"Ocurrió un error inesperado en Carrefour: {e}")
         await page.screenshot(path="debug_carrefour_error.png", full_page=True)
     
     finally:
         await page.close()
 
-    return { "source": "carrefour", "items": items_list }
+    return items_list
