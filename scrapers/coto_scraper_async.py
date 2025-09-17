@@ -2,7 +2,7 @@
 from typing import List, Dict, Optional
 import json, urllib.parse, re, time, datetime, os, asyncio, unicodedata
 
-from scrapers.carrefour_scraper_async import PROMO_NORMALIZER
+from scrapers._utils_promos import PROMO_NORMALIZER
 
 # ===================== Config =====================
 

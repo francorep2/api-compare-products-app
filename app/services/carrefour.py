@@ -1,7 +1,7 @@
 # app/services/carrefour_async.py
 from typing import List, Dict, Optional
 from app.core.browser_async import browser_manager_async
-from scrapers.carrefour_scraper_async import search as carrefour_search
+from scrapers.carrefour_scraper_async import search 
 
 DEFAULT_CTX = {
     "locale": "es-AR",
@@ -14,4 +14,4 @@ DEFAULT_CTX = {
 
 async def search_carrefour(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
     async with browser_manager_async.new_context(**DEFAULT_CTX) as ctx:
-        return await carrefour_search(ctx, q=q, barcode=barcode, limit=limit)
+        return await search(ctx, q=q, barcode=barcode, limit=limit)

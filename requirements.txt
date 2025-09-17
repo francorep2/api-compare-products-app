@@ -16,3 +16,6 @@ aiohttp
 selectolax
 httpx
 beautifulsoup4
+requests
+playwright-stealth
+playwright_stealth
