@@ -7,9 +7,10 @@ from app.services.carrefour import search_carrefour
 from app.services.jumbo import search_jumbo  
 from fastapi import APIRouter, Query
 from app.services.all import search_all_grouped
+from app.dependencies.auth import get_current_user, User
+from fastapi import APIRouter, Depends
 
-
-router = APIRouter(prefix="/search", tags=["search"])
+router = APIRouter(prefix="/search", tags=["search"],dependencies=[Depends(get_current_user)],)
 
 @router.get("/coto")
 async def search_coto_endpoint(

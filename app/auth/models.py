@@ -1,6 +1,7 @@
 # app/auth/models.py
-from sqlalchemy import String, Integer, Boolean, DateTime, ForeignKey, func
+from sqlalchemy import Index, String, Integer, Boolean, DateTime, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlmodel import Column
 from app.db import Base
 import uuid
 from sqlalchemy import String, Integer, Boolean, DateTime, ForeignKey, func, UniqueConstraint
@@ -54,3 +55,28 @@ class OTPCode(Base):
     created_at: Mapped["DateTime"] = mapped_column(DateTime, server_default=func.now())
 
     user: Mapped[User] = relationship(back_populates="otps")
+
+
+
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+
+    token_hash = Column(String(255), unique=True, nullable=False)
+    user_agent = Column(String(255), nullable=True)
+    device_id = Column(String(255), nullable=True)
+    ip = Column(String(64), nullable=True)
+
+    created_at = Column(DateTime, default=dt.datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    last_used_at = Column(DateTime, nullable=True)
+
+    revoked = Column(Boolean, default=False, nullable=False)
+    replaced_by_id = Column(Integer, ForeignKey("refresh_tokens.id"), nullable=True)
+
+    user = relationship("User", backref="refresh_tokens", foreign_keys=[user_id])
+    replaced_by = relationship("RefreshToken", remote_side=[id], uselist=False)
+
+Index("ix_refresh_tokens_hash", RefreshToken.token_hash)

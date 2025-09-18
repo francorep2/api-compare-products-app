@@ -16,9 +16,11 @@ from scrapers.barcode_resolver import (
     resolve_name_dia,
     resolve_name_jumbo,
 )
+from app.dependencies.auth import get_current_user, User
+from fastapi import APIRouter, Depends
 
 log = logging.getLogger(__name__)
-router = APIRouter(prefix="/search/barcode", tags=["barcode"])
+router = APIRouter(prefix="/search/barcode", tags=["barcode"],dependencies=[Depends(get_current_user)])
 
 STOP = {
     "de","del","la","el","los","las","con","sin","x","por","y","en","a","al","para",

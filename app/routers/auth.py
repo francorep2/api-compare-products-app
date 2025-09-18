@@ -10,6 +10,10 @@ from app.auth.security import (
     hash_password, verify_password, create_access_token,
     generate_otp_code, new_challenge_id, minutes_from_now, decode_token
 )
+from app.auth.models import RefreshToken
+from app.auth.security import (
+    new_refresh_token_value, hash_refresh_token, refresh_expires_at
+)
 from app.auth.emailer import send_otp_email
 from app.auth.security import create_reset_token
 
@@ -32,6 +36,22 @@ def _create_pwd_otp(bg: BackgroundTasks, db: Session, user: User) -> str:
     db.add(otp); db.commit()
     bg.add_task(send_otp_email, user.email, code, "verify")
     return challenge
+
+def _issue_token_pair(db: Session, *, user: User, user_agent=None, device_id=None, ip=None):
+    access = create_access_token(user.id, user.email)
+    refresh_plain = new_refresh_token_value()
+
+    rt = RefreshToken(
+        user_id=user.id,
+        token_hash=hash_refresh_token(refresh_plain),
+        user_agent=user_agent,
+        device_id=device_id,
+        ip=ip,
+        expires_at=refresh_expires_at(),
+    )
+    db.add(rt); db.commit()
+    return {"access_token": access, "refresh_token": refresh_plain, "token_type": "bearer"}
+
 
 @router.post("/password/reset/start")
 def password_reset_start(
@@ -247,9 +267,8 @@ def register_verify(
     db.commit()
     db.refresh(user)
 
-    token = create_access_token(user.id, user.email)
     db.commit()
-    return S.TokenOut(access_token=token)
+    return _issue_token_pair(db, user=user)
 
 
 @router.post("/register/resend")
@@ -278,21 +297,12 @@ def register_resend(
 
 # ------------------------ Login SIN OTP (token directo) ------------------------
 
-@router.post("/login", response_model=S.TokenOut)
-def login_direct(
-    data: S.LoginStartIn,   # reutilizamos el esquema: {email, password}
-    db: Session = Depends(get_db)
-):
+@router.post("/login", response_model=S.TokenPairOut)
+def login_direct(data: S.LoginStartIn, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == data.email.lower()).first()
-    if not user or not user.is_active:
+    if not user or not user.is_active or not verify_password(data.password, user.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credenciales inválidas")
-
-    if not verify_password(data.password, user.password_hash):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credenciales inválidas")
-
-    # Generar token directo
-    token = create_access_token(user.id, user.email)
-    return S.TokenOut(access_token=token)
+    return _issue_token_pair(db, user=user)
 
 
 # ------------------------ Perfil ------------------------
@@ -319,4 +329,37 @@ def me(
 
 # ------------------------ Editar usuario ------------------------
 
+@router.post("/refresh", response_model=S.TokenPairOut)
+def refresh_tokens(data: S.RefreshIn, db: Session = Depends(get_db)):
+    if not data.refresh_token:
+        raise HTTPException(401, "Falta refresh_token")
 
+    rt = db.query(RefreshToken).filter(
+        RefreshToken.token_hash == hash_refresh_token(data.refresh_token),
+        RefreshToken.revoked == False
+    ).first()
+
+    if not rt or rt.expires_at < datetime.utcnow():
+        raise HTTPException(401, "Refresh token inválido o expirado")
+
+    user = db.query(User).filter(User.id == rt.user_id).first()
+    if not user or not user.is_active:
+        raise HTTPException(401, "Usuario inválido")
+
+    # revocar token viejo
+    rt.revoked = True
+    db.commit()
+
+    return _issue_token_pair(db, user=user, device_id=data.device_id)
+
+@router.post("/logout")
+def logout(data: S.LogoutIn, db: Session = Depends(get_db)):
+    if not data.refresh_token:
+        raise HTTPException(401, "Falta refresh_token")
+    rt = db.query(RefreshToken).filter(
+        RefreshToken.token_hash == hash_refresh_token(data.refresh_token)
+    ).first()
+    if rt:
+        rt.revoked = True
+        db.commit()
+    return {"message": "Sesión cerrada"}

@@ -3,12 +3,16 @@ import os, time, uuid, secrets, datetime as dt
 from passlib.context import CryptContext
 import jwt 
 from datetime import datetime, timezone, timedelta
+import secrets, hashlib
+
 
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
 JWT_ALG = "HS256"
 ACCESS_MINUTES = 60
+REFRESH_TTL_DAYS = 30
+
 
 def create_reset_token(user_id: int, email: str, minutes: int = 15) -> str:
     now = datetime.utcnow()
@@ -50,3 +54,15 @@ def new_challenge_id() -> str:
 
 def minutes_from_now(m: int) -> dt.datetime:
     return dt.datetime.utcnow() + dt.timedelta(minutes=m)
+
+def _sha256(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def new_refresh_token_value() -> str:
+    return secrets.token_urlsafe(64)
+
+def hash_refresh_token(token_plain: str) -> str:
+    return _sha256(token_plain)
+
+def refresh_expires_at(days: int = REFRESH_TTL_DAYS) -> datetime:
+    return datetime.utcnow() + timedelta(days=days)

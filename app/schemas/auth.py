@@ -69,3 +69,21 @@ class UserOut(BaseModel):
 
     class Config:
         orm_mode = True
+        
+        
+class TokenPairOut(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+
+class RefreshIn(BaseModel):
+    refresh_token: Optional[str] = Field(
+        default=None,
+        description="En mobile se manda en body; en web puede venir por cookie HttpOnly"
+    )
+    device_id: Optional[str] = None
+
+
+class LogoutIn(BaseModel):
+    refresh_token: Optional[str] = None  # opcional si usás cookie HttpOnly

@@ -19,3 +19,4 @@ beautifulsoup4
 requests
 playwright-stealth
 playwright_stealth
+sqlmodel
