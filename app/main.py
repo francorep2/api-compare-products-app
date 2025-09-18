@@ -16,6 +16,8 @@ from app.auth import models as _  # noqa: F401
 from app.routers import user
 from app.routers import barcode
 from app.core.browser_async import browser_manager_async
+from app.routers.search_config import router as search_config_router
+
 
 
 
@@ -27,6 +29,7 @@ app.include_router(shopping_list)
 app.include_router(scrap_router)
 app.include_router(user.router)
 app.include_router(barcode.router)
+app.include_router(search_config_router)
 
 @app.on_event("startup")
 async def on_startup():  

@@ -9,6 +9,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 import uuid
 import datetime as dt
+from sqlalchemy import Column, Integer, Boolean, ForeignKey, UniqueConstraint
+from sqlalchemy.orm import relationship
+from app.db import Base
+
 
 class PendingRegistration(Base):
     __tablename__ = "pending_registrations"
@@ -80,3 +84,14 @@ class RefreshToken(Base):
     replaced_by = relationship("RefreshToken", remote_side=[id], uselist=False)
 
 Index("ix_refresh_tokens_hash", RefreshToken.token_hash)
+
+class ScrapePrefs(Base):
+    __tablename__ = "scrape_prefs"
+
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    include_coto = Column(Boolean, default=True, nullable=False)
+    include_carrefour = Column(Boolean, default=True, nullable=False)
+    include_dia = Column(Boolean, default=True, nullable=False)
+    include_jumbo = Column(Boolean, default=True, nullable=False)
+
+    user = relationship("User", backref="scrape_prefs", uselist=False)

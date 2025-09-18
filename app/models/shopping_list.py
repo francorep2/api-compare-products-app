@@ -1,4 +1,6 @@
 # app/models/shopping.py
+from dataclasses import Field
+from typing import List, Optional
 from sqlalchemy.orm import Mapped, mapped_column, relationship, DeclarativeBase
 from sqlalchemy import Date, ForeignKey, text, Boolean
 from datetime import date, datetime
@@ -26,3 +28,4 @@ class ShoppingItem(Base):
     created_at: Mapped[str] = mapped_column(Date, server_default=text("CURRENT_DATE"))
     list: Mapped[ShoppingList] = relationship(back_populates="items")
     
+
