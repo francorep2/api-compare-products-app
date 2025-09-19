@@ -2,6 +2,8 @@
 from typing import List, Dict, Optional
 from app.core.browser_async import browser_manager_async
 from scrapers.dia_scraper_async import search as dia_search
+from scrapers.vtex_utils_async import dedupe_and_trim
+
 
 DEFAULT_CTX = {
     "locale": "es-AR",
