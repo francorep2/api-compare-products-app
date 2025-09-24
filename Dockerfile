@@ -11,8 +11,8 @@ COPY ./requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 
 # Playwright + Chromium
-RUN pip install "playwright==1.47.2" && \
-    python -m playwright install --with-deps chromium
+RUN pip install "playwright==1.55.0"
+RUN python -m playwright install --with-deps chromium
 
 # Resto del código (también desde la raíz)
 COPY . /app
