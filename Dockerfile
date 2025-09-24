@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 👇 requirements.txt está en la RAÍZ del repo
 COPY ./requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip && pip install -r /app/requirements.txt
+RUN pip install gunicorn uvicorn[standard]
 
 # Playwright + Chromium
 RUN pip install "playwright==1.55.0"

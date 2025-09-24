@@ -20,3 +20,5 @@ requests
 playwright-stealth
 playwright_stealth
 sqlmodel
+gunicorn
+uvicorn[standard]
