@@ -14,8 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Dependencias Python
-COPY requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip && pip install -r ../requirements.txt
+COPY requirements.txt requirements.txt
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
 # Instala Playwright y navegadores (Chromium) + dependencias del SO
 RUN pip install "playwright==1.47.2" && \
