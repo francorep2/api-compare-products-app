@@ -18,7 +18,9 @@ RUN python -m playwright install --with-deps chromium
 # Resto del código (también desde la raíz)
 COPY . /app
 
+ENV PYTHONPATH=/app
+
 EXPOSE 8000
 CMD bash -lc '\
   if [ -f "alembic.ini" ]; then alembic upgrade head || echo "skip"; fi && \
-  gunicorn app.main:app -k uvicorn.workers.UvicornWorker -b 0.0.0.0:${PORT} --workers ${WORKERS} --timeout 180'
+  python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --log-level debug'
