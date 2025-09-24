@@ -1,0 +1,60 @@
+# render.yaml
+previews:
+  generation: off
+
+databases:
+  - name: groceries-db
+    databaseName: groceries
+    user: groceries_user
+    plan: starter
+    region: virginia
+    postgresMajorVersion: "17"
+
+services:
+  - type: web
+    name: groceries-api
+    runtime: docker
+    plan: starter
+    region: virginia
+    healthCheckPath: /health
+    envVars:
+      # DB: usa la URL interna privada de Render (mejor latencia)
+      - key: DATABASE_URL
+        fromDatabase:
+          name: groceries-db
+          property: connectionString
+
+      # Email / SendGrid (completa en el deploy)
+      - key: USE_SENDGRID_API
+        value: "1"
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: MAIL_FROM
+        value: "francorep02@gmail.com"
+
+      - key: SMTP_DRY_RUN
+        value: "0"
+      - key: SMTP_HOST
+        value: "smtp.sendgrid.net"
+      - key: SMTP_PORT
+        value: "2525"
+      - key: SMTP_USER
+        value: "apikey"
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_TLS
+        value: "1"
+      - key: SMTP_SSL
+        value: "0"
+      - key: SMTP_TIMEOUT
+        value: "20"
+      - key: APP_NAME
+        value: "Comparador Super"
+
+      # JWT
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_ALGORITHM
+        value: "HS256"
+      - key: JWT_SUB_CLAIM
+        value: "sub"
