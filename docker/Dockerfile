@@ -2,7 +2,7 @@ FROM mcr.microsoft.com/playwright/python:v1.47.2-noble
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PORT=8000 WORKERS=2
 WORKDIR /app
 
-COPY requirements.txt /app/requirements.txt
+COPY ../requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . /app
