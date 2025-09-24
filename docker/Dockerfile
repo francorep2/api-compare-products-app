@@ -15,3 +15,5 @@ CMD bash -lc '\
   fi && \
   echo ">> Starting Gunicorn" && \
   gunicorn app.main:app -k uvicorn.workers.UvicornWorker -b 0.0.0.0:${PORT} --workers ${WORKERS} --timeout 180'
+
+  
