@@ -5,7 +5,7 @@ import logging
 import inspect
 
 from app.services.coto import search_coto
-from app.services.carrefour import search_carrefour
+from app.services.carrefour import search_carrefour 
 from app.services.dia import search_dia
 from app.services.jumbo import search_jumbo
 
@@ -13,7 +13,6 @@ log = logging.getLogger(__name__)
 
 HEAVY_PROVIDERS = {"carrefour", "dia"}
 
-# nombre -> función (puede ser sync o async)
 PROVIDERS: Dict[str, Callable[..., List[Dict]]] = {
     "carrefour": search_carrefour,
     "coto": search_coto,
@@ -21,48 +20,52 @@ PROVIDERS: Dict[str, Callable[..., List[Dict]]] = {
     "dia": search_dia,
 }
 
+PER_PROVIDER_TIMEOUT = 15   # segundos máx por tienda
+OVERALL_TIMEOUT = 40        # máx para toda la búsqueda
+
+
 async def _invoke_provider(fn: Callable[..., List[Dict]],
                            q: Optional[str],
                            barcode: Optional[str],
                            limit: int):
-    """
-    Llama al provider sea sync o async.
-    - Si es coroutinefunction -> await directo
-    - Si es sync -> ejecuta en thread (to_thread)
-    """
+    """Llama al provider, async o sync."""
     if inspect.iscoroutinefunction(fn):
         return await fn(q=q, barcode=barcode, limit=limit)
     else:
-        # Nota: to_thread pasa args posicionales
         return await asyncio.to_thread(fn, q, barcode, limit)
 
-async def _run_provider(name: str, fn: Callable[..., List[Dict]],
-                        q: Optional[str], barcode: Optional[str], limit: int,
-                        sem: asyncio.Semaphore) -> List[Dict]:
-    """
-    Envuelve la ejecución con semáforo para pesados, manejo de errores
-    y normaliza el resultado a list.
-    """
-    try:
-        if name in HEAVY_PROVIDERS:
-            async with sem:
-                res = await _invoke_provider(fn, q, barcode, limit)
-        else:
-            res = await _invoke_provider(fn, q, barcode, limit)
 
-        # Normalización defensiva
+async def _run_provider(name: str,
+                        fn: Callable[..., List[Dict]],
+                        q: Optional[str],
+                        barcode: Optional[str],
+                        limit: int,
+                        sem: asyncio.Semaphore) -> List[Dict]:
+    """Ejecuta un provider con semáforo, timeout y manejo de errores."""
+    try:
+        async def _job():
+            if name in HEAVY_PROVIDERS:
+                async with sem:
+                    return await _invoke_provider(fn, q, barcode, limit)
+            return await _invoke_provider(fn, q, barcode, limit)
+
+        res = await asyncio.wait_for(_job(), timeout=PER_PROVIDER_TIMEOUT)
+
         if res is None:
             return []
         if inspect.isawaitable(res):
-            # Por si el provider sync devolvió un awaitable (caso raro)
             res = await res
         if not isinstance(res, list):
-            log.warning(f"[all] Provider {name} devolvió {type(res)}; se esperaba list. Lo fuerzo a [].")
+            log.warning(f"[all] Provider {name} devolvió {type(res)}; se esperaba list.")
             return []
         return res
+    except asyncio.TimeoutError:
+        log.warning(f"[all] Provider {name} excedió {PER_PROVIDER_TIMEOUT}s")
+        return []
     except Exception as e:
         log.exception(f"[all] Provider {name} falló: {e}")
         return []
+
 
 async def search_all_grouped(
     q: Optional[str] = None,
@@ -70,9 +73,7 @@ async def search_all_grouped(
     limit: int = 3,
     enabled: Optional[List[str]] = None,
 ) -> Dict[str, object]:
-    """
-    Agrega resultados por tienda. Acepta scrapers sync y async.
-    """
+    """Agrega resultados por tienda. Corre todo en paralelo con control de tiempo."""
     if not q and not barcode:
         empty = {k: [] for k in PROVIDERS.keys()}
         return {"results": empty, "count": 0, "enabled": list(PROVIDERS.keys())}
@@ -80,22 +81,29 @@ async def search_all_grouped(
     enabled_set = set(enabled or PROVIDERS.keys())
     active = {k: v for k, v in PROVIDERS.items() if k in enabled_set}
 
-    # Un pesado a la vez
     browser_semaphore = asyncio.Semaphore(1)
 
-    tasks = {
-        name: asyncio.create_task(
-            _run_provider(name, fn, q=q, barcode=barcode, limit=limit, sem=browser_semaphore)
+    tasks = [
+        asyncio.create_task(
+            _run_provider(name, fn, q, barcode, limit, browser_semaphore)
         )
         for name, fn in active.items()
+    ]
+
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=False),
+            timeout=OVERALL_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        log.warning(f"[all] Timeout general de {OVERALL_TIMEOUT}s")
+        results = [[] for _ in active]
+
+    results_per_store: Dict[str, List[Dict]] = {
+        name: (res or [])[:limit] for name, res in zip(active.keys(), results)
     }
 
-    results_per_store: Dict[str, List[Dict]] = {}
-    for name, task in tasks.items():
-        items = await task  # <— AQUI nos aseguramos de obtener la lista, no una coroutine
-        results_per_store[name] = (items or [])[:limit]
-
-    # Asegura claves también para deshabilitadas
+    # asegurar claves vacías para deshabilitadas
     for name in PROVIDERS.keys():
         results_per_store.setdefault(name, [])
 

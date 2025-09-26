@@ -22,3 +22,4 @@ playwright_stealth
 sqlmodel
 gunicorn
 uvicorn[standard]
+httpx[http2]
