@@ -23,3 +23,4 @@ sqlmodel
 gunicorn
 uvicorn[standard]
 httpx[http2]
+lxml
