@@ -43,7 +43,11 @@ class User(Base):
     created_at: Mapped["DateTime"] = mapped_column(DateTime, server_default=func.now())
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)
     last_name: Mapped[str] = mapped_column(String(100), nullable=False)
-
+    tickets: Mapped[list["SupportTicket"]] = relationship(
+        "SupportTicket",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
     otps: Mapped[list["OTPCode"]] = relationship(back_populates="user")
 
 class OTPCode(Base):
