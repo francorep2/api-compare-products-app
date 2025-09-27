@@ -14,9 +14,9 @@ def submit_ticket(
     current_user: User = Depends(get_current_user),
 ):
     t = SupportTicket(
-        user_id=current_user.id,
-        message=ticket_in.message,
-        status=TicketStatus.OPEN,
+            user_id=int(current_user.id),            
+            message=ticket_in.message,
+            status=TicketStatus.OPEN.value,  
     )
     session.add(t)
     session.commit()
