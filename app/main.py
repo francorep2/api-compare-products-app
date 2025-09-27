@@ -19,6 +19,7 @@ from app.core.browser_async import browser_manager_async
 from app.routers.search_config import router as search_config_router
 from contextlib import asynccontextmanager
 from playwright.async_api import async_playwright
+from app.routers import support
 
 app = FastAPI(title="Groceries Search API", version="1.0.0")
 
@@ -29,6 +30,7 @@ app.include_router(scrap_router)
 app.include_router(user.router)
 app.include_router(barcode.router)
 app.include_router(search_config_router)
+app.include_router(support.submit_ticket)
 
 
 playwright_instance = { "context": None }
