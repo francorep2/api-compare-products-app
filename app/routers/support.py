@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.schemas.support import SubmitSupportTiket
 from app import db
-from app.dependencies.auth import get_current_user 
+from app.dependencies.auth import get_current_user, User
 
 router = APIRouter(prefix="/support", tags=["Support"])
 
@@ -11,7 +11,7 @@ router = APIRouter(prefix="/support", tags=["Support"])
 def submit_ticket(
     ticket_in: SubmitSupportTiket, 
     db: Session = Depends(db.get_db),
-    current_user: models.User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Permite a un usuario autenticado enviar un nuevo ticket de soporte.
