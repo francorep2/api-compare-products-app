@@ -19,9 +19,9 @@ DATABASE_URL = os.getenv("DATABASE_URL", _pg_url())
 engine = create_engine(
     DATABASE_URL,
     future=True,
-    pool_size=5,              # ajustá según tu server
+    pool_size=5,              
     max_overflow=5,
-    pool_pre_ping=True,       # detecta conexiones caídas
+    pool_pre_ping=True,     
 )
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
