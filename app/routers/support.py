@@ -23,5 +23,4 @@ def submit_ticket(
     db.add(new_ticket)
     db.commit()
     db.refresh(new_ticket)
-    
     return {"detail": "Tu reporte ha sido enviado con éxito."}
