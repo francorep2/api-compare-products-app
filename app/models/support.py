@@ -5,7 +5,7 @@ from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 import enum
 
-from app.db.base import Base
+from app.db import Base
 
 # Enum de estado: usa Postgres ENUM nativo con nombre estable para migraciones
 class TicketStatus(str, enum.Enum):
