@@ -1,26 +1,24 @@
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
-from app import models
-from app.schemas.support import SubmitSupportTiket
-from app import db
+from app.db import get_db
 from app.dependencies.auth import get_current_user, User
+from app.models.support import SupportTicket, TicketStatus
+from app.schemas.support import SupportTicketCreate, SupportTicketOut
 
 router = APIRouter(prefix="/support", tags=["Support"])
 
-@router.post("/tickets", status_code=status.HTTP_201_CREATED)
+@router.post("/tickets", status_code=status.HTTP_201_CREATED, response_model=SupportTicketOut)
 def submit_ticket(
-    ticket_in: SubmitSupportTiket, 
-    db: Session = Depends(db.get_db),
-    current_user: User = Depends(get_current_user)
+    ticket_in: SupportTicketCreate,
+    session: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    Permite a un usuario autenticado enviar un nuevo ticket de soporte.
-    """
-    new_ticket = models.SupportTicket(
-        user_id=current_user.id, 
-        message=ticket_in.message
+    t = SupportTicket(
+        user_id=current_user.id,
+        message=ticket_in.message,
+        status=TicketStatus.OPEN,
     )
-    db.add(new_ticket)
-    db.commit()
-    db.refresh(new_ticket)
-    return {"detail": "Tu reporte ha sido enviado con éxito."}
+    session.add(t)
+    session.commit()
+    session.refresh(t)
+    return t
