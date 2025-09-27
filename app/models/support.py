@@ -14,13 +14,6 @@ class TicketStatus(str, enum.Enum):
     RESOLVED = "resuelto"
     CLOSED = "cerrado"
 
-class User(Base):
-    __tablename__ = "users"
-    id: Mapped[int] = mapped_column(primary_key=True, index=True)
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
-    # … tu resto de columnas
-    tickets = relationship("SupportTicket", back_populates="user", cascade="all,delete-orphan")
-
 class SupportTicket(Base):
     __tablename__ = "support_tickets"
 
