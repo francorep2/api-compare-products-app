@@ -1,5 +1,5 @@
 
-from ast import str
+
 from pydantic import BaseModel, EmailStr
 
 
