@@ -26,7 +26,7 @@ app.include_router(scrap_router)
 app.include_router(user.router)
 app.include_router(barcode.router)
 app.include_router(search_config_router)
-app.include_router(support.submit_ticket)
+app.include_router(support.support_router)
 
 
 playwright_instance = { "context": None }

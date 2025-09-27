@@ -5,7 +5,7 @@ from app.schemas.support import SubmitSupportTiket
 from app import db
 from app.dependencies.auth import get_current_user, User
 
-router = APIRouter(prefix="/support", tags=["Support"])
+support_router = APIRouter(prefix="/support", tags=["Support"])
 
 @router.post("/tickets", status_code=status.HTTP_201_CREATED)
 def submit_ticket(
