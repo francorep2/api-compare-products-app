@@ -20,14 +20,18 @@ class SupportTicket(Base):
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
     message: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # ENUM nativo de Postgres. El parámetro "name" es CLAVE para Alembic.
-    status = Column(
-        Enum(TicketStatus, name="ticket_status_enum", create_type=True),
+    status = mapped_column(
+        Enum(
+            TicketStatus,
+            name="ticket_status_enum",
+            create_type=True,
+            values_callable=lambda e: [m.value for m in e], 
+            validate_strings=True,
+        ),
         nullable=False,
-        default=TicketStatus.OPEN,
-        server_default=TicketStatus.OPEN.value,
+        default=TicketStatus.OPEN,         
+        server_default=TicketStatus.OPEN.value,  
     )
-
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     user = relationship("User", back_populates="tickets")
 

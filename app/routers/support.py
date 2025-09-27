@@ -16,7 +16,7 @@ def submit_ticket(
     t = SupportTicket(
             user_id=int(current_user.id),            
             message=ticket_in.message,
-            status=TicketStatus.OPEN.value,  
+            status=TicketStatus.OPEN,  
     )
     session.add(t)
     session.commit()
