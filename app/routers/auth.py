@@ -191,15 +191,12 @@ def _create_pending_and_queue_email(
     return challenge
 
 
-# ------------------------ Registro (con OTP) ------------------------
-
 @router.post("/register/start", response_model=S.RegisterStartOut)
 def register_start(
     data: S.RegisterStartIn,
     bg: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
-    # Si ya existe usuario activo con ese email, no revelamos demasiado
     existing = db.query(User).filter(User.email == data.email.lower()).first()
     if existing:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No se pudo iniciar el registro")

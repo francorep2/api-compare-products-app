@@ -1,10 +1,9 @@
-# app/services/coto_async.py
 from typing import List, Dict, Optional
 from app.core.browser_async import browser_manager_async
-from scrapers.coto_scraper_async import search as coto_search  # <-- async!
+from scrapers.coto_scraper_async import search as coto_search
 import json, re
-from typing import Optional, Tuple
 
+# --- ESTA PARTE DE TU CÓDIGO ORIGINAL SE MANTIENE EXACTAMENTE IGUAL ---
 async def _json_parse_safe(txt: str):
     try:
         return json.loads(txt)
@@ -12,8 +11,6 @@ async def _json_parse_safe(txt: str):
         return None
 
 async def _page_contains_ean(page, ean: str) -> bool:
-    """True si el PDP contiene el EAN (JSON-LD gtin* o literal en HTML)."""
-    # 1) JSON-LD
     try:
         scripts = await page.eval_on_selector_all(
             "script[type='application/ld+json']",
@@ -21,7 +18,7 @@ async def _page_contains_ean(page, ean: str) -> bool:
         )
     except Exception:
         scripts = []
-
+    
     for s in scripts or []:
         data = await _json_parse_safe(s)
         if not data:
@@ -39,18 +36,16 @@ async def _page_contains_ean(page, ean: str) -> bool:
         else:
             if has_gtin(data):
                 return True
-
-    # 2) Fallback: buscar el EAN literal en el HTML (Coto muchas veces no pone JSON-LD completo)
+    
     try:
         html = await page.content()
     except Exception:
         html = ""
-
+    
     if html and re.search(rf"\b{re.escape(str(ean))}\b", html):
         return True
 
     return False
-
 
 DEFAULT_CTX = {
     "locale": "es-AR",
@@ -61,7 +56,14 @@ DEFAULT_CTX = {
     "viewport": {"width": 1366, "height": 800},
 }
 
-async def search_coto(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
-    print(f"[#EAN TASK 2] -------------> {q}"),
-    async with browser_manager_async.new_context(**DEFAULT_CTX) as ctx:
-        return await coto_search(ctx, q=q, barcode=barcode, limit=limit)
+
+# --- FUNCIÓN CORREGIDA ---
+async def search_coto(ctx, q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
+    """
+    Esta función ahora RECIBE el contexto de Playwright ('ctx') en lugar de crearlo.
+    Simplemente pasa los argumentos a la función de scraping real.
+    """
+    # Se eliminó el bloque 'async with browser_manager_async.new_context...'
+    # porque el contexto ahora viene desde afuera (desde list_comparator).
+    print(f"[#EAN TASK 2 COTO] -------------> q={q}, barcode={barcode}")
+    return await coto_search(ctx=ctx, q=q, barcode=barcode, limit=limit)

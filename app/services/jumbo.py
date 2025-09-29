@@ -12,6 +12,6 @@ DEFAULT_CTX = {
     "viewport": {"width": 1366, "height": 800},
 }
 
-async def search_jumbo(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
+async def search(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
     async with browser_manager_async.new_context(**DEFAULT_CTX) as ctx:
         return await jumbo_search(ctx, q=q, barcode=barcode, limit=limit)

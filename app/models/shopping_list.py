@@ -2,7 +2,7 @@
 from dataclasses import Field
 from typing import List, Optional
 from sqlalchemy.orm import Mapped, mapped_column, relationship, DeclarativeBase
-from sqlalchemy import Date, ForeignKey, text, Boolean
+from sqlalchemy import JSON, Column, Date, ForeignKey, text, Boolean
 from datetime import date, datetime
 
 class Base(DeclarativeBase):
@@ -17,6 +17,8 @@ class ShoppingList(Base):
     items: Mapped[list["ShoppingItem"]] = relationship(
         back_populates="list", cascade="all, delete-orphan", passive_deletes=True
     )
+    comparison_results = Column(JSON, nullable=True)
+
 
 class ShoppingItem(Base):
     __tablename__ = "shopping_item"

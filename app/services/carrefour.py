@@ -2,7 +2,7 @@
 from typing import List, Dict, Optional
 from scrapers.carrefour_scraper_async import search_carrefour as _search_carrefour
 
-async def search_carrefour(
+async def search(
     q: Optional[str] = None,
     barcode: Optional[str] = None,
     limit: int = 3,
