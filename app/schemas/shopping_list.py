@@ -74,13 +74,25 @@ class StoreItemOut(BaseModel):
     image_url: Optional[str] = None
     missing: Optional[bool] = None
 
-class StoreQuoteOut(BaseModel):
-    total: float
-    save: float
-    items: List[StoreItemOut]
+# --- SCHEMAS PARA LA PETICIÓN DE COMPARACIÓN ---
 
-class CompareResponse(BaseModel):
-    currency: str = "ARS"
-    best_store: Optional[str]
-    best_total: float
-    stores: Dict[str, StoreQuoteOut]  # { "carrefour": StoreQuoteOut, ... }
+class ComparisonItemIn(BaseModel):
+    nombre: str
+    cantidad: int = 1
+
+class ComparisonRequestIn(BaseModel):
+    items: List[ComparisonItemIn]
+    enabled: Optional[List[str]] = None
+
+
+# --- SCHEMAS PARA LA RESPUESTA DE COMPARACIÓN ---
+
+class StoreSummary(BaseModel):
+    total: float
+    missing_count: int
+    missing_items: List[str]
+
+class ComparisonSummaryOut(BaseModel):
+    totals_by_store: Dict[str, StoreSummary]
+    winner: Optional[str] = None
+    updated_at: str

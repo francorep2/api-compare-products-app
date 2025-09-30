@@ -17,9 +17,9 @@ from app.routers.search_config import router as search_config_router
 from contextlib import asynccontextmanager
 from playwright.async_api import async_playwright
 from app.routers import support
+from app.routers import list_comparator
 
 app = FastAPI(title="Groceries API", version="1.0.0")
-
 
 app.include_router(auth_router)
 app.include_router(shopping_list)
@@ -28,7 +28,7 @@ app.include_router(user.router)
 app.include_router(barcode.router)
 app.include_router(search_config_router)
 app.include_router(support.router)
-
+app.include_router(list_comparator.router)
 
 playwright_instance = { "context": None }
 
