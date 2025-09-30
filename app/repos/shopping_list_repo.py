@@ -39,9 +39,9 @@ def update_list_name(db: Session, list_id: int, new_name: str) -> SimpleNamespac
         text(
             """
             UPDATE shopping_list
-            SET nombre = :new_name, updated_at = NOW()
+            SET nombre = :new_name,
             WHERE id = :list_id
-            RETURNING id, nombre, created_at, updated_at
+            RETURNING id, nombre, created_at
             """
         ),
         {"list_id": list_id, "new_name": new_name},
