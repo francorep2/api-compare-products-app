@@ -1,3 +1,4 @@
+# app/core/browser_async.py (o donde lo tengas)
 from contextlib import asynccontextmanager
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext
 
@@ -11,7 +12,6 @@ DEFAULT_CTX = {
 }
 
 def should_block_request(route):
-    """Función para decidir qué recursos bloquear."""
     return route.request.resource_type in {"image", "stylesheet", "font", "media"}
 
 class AsyncBrowserManager:
@@ -34,16 +34,13 @@ class AsyncBrowserManager:
 
     @asynccontextmanager
     async def new_context(self, **ctx_overrides):
-        if not self._browser:
-            raise Exception("El navegador no ha sido iniciado.")
-            
+        # 👇 Auto-start si alguien no llamó startup()
+        if self._browser is None:
+            await self.startup(headless=True)
+
         ctx_options = {**DEFAULT_CTX, **ctx_overrides}
         context = await self._browser.new_context(**ctx_options)
-        
-        # --- MEJORA DE VELOCIDAD AÑADIDA AQUÍ ---
-        # Bloqueamos los recursos innecesarios antes de usar el contexto.
         await context.route("**/*", lambda route: route.abort() if should_block_request(route) else route.continue_())
-        
         try:
             yield context
         finally:
