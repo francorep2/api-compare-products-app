@@ -15,7 +15,7 @@ from app.repos.shopping_list_repo import (
 from app.dependencies.auth import get_current_user  
 
 class RenameIn(Base):
-    nombre: str = Field(min_length=1, max_length=120)
+    nombre: str
 
 
 router = APIRouter(prefix="/shopping", tags=["shopping"])
