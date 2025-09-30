@@ -3,15 +3,16 @@ import logging
 import re
 import unicodedata
 import inspect
-from fastapi import APIRouter, Query, HTTPException, Depends, Request
+from app.core import browser
+from fastapi import APIRouter, Query, HTTPException, Depends
 from typing import Dict, List, Optional
 
 from app.models.search_item import SearchItem
 from app.services.coto import search_coto
 from app.services.peer_name_resolver import resolve_product_name_from_peers
-from app.services.jumbo import search
-from app.services.carrefour import search
-from app.services.dia import search
+from app.services.jumbo import search_jumbo
+from app.services.carrefour import search_carrefour
+from app.services.dia import search_dia
 from scrapers.barcode_resolver import (
     resolve_name_carrefour,
     resolve_name_dia,
@@ -125,33 +126,25 @@ def _dedup(seq: list[str]) -> list[str]:
             seen.add(s); out.append(s)
     return out
 
+ctx = browser.new_context(
+        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36'
+    )
+# ------------ ENDPOINT ------------
 @router.get("/all")
 async def search_barcode_all(
-    request: Request,                                   # ⬅️ agregar
     barcode: str = Query(..., min_length=5, max_length=32),
     limit: int = Query(3, ge=1, le=10),
     enabled: Optional[List[str]] = Query(None, description="repetir clave o CSV"),
 ):
     enabled_set = set(_split_csv(enabled) or ALLOWED)
 
-    # tomar el ctx global inicializado en startup
-    ctx = getattr(request.app.state, "scrape_ctx", None)
-    if ctx is None:
-        # si no está listo, devolvé 503 o caé a “no buscar coto”
-        # raise HTTPException(503, "Scrape context not ready")
-        pass
-
-    # --- FASE 1 ---
+    # --- FASE 1: BÚSQUEDA DIRECTA Y RESOLUCIÓN DE NOMBRES EN PARALELO ---
     initial_tasks = {
-        "coto_direct": (
-            search_coto(ctx=ctx, barcode=barcode, limit=limit)   # ⬅️ pasar ctx
-            if ("coto" in enabled_set and ctx is not None) else asyncio.sleep(0, result=[])
-        ),
+        "coto_direct": search_coto(ctx, barcode=barcode, limit=limit) if "coto" in enabled_set else asyncio.sleep(0, result=[]),
         "name_carrefour": resolve_name_carrefour(barcode) if "carrefour" in enabled_set else asyncio.sleep(0, result=None),
-        "name_dia":       resolve_name_dia(barcode)       if "dia"       in enabled_set else asyncio.sleep(0, result=None),
-        "name_jumbo":     resolve_name_jumbo(barcode)     if "jumbo"     in enabled_set else asyncio.sleep(0, result=None),
+        "name_dia": resolve_name_dia(barcode) if "dia" in enabled_set else asyncio.sleep(0, result=None),
+        "name_jumbo": resolve_name_jumbo(barcode) if "jumbo" in enabled_set else asyncio.sleep(0, result=None),
     }
-
     initial_results = await asyncio.gather(*initial_tasks.values(), return_exceptions=True)
     initial_results_map = dict(zip(initial_tasks.keys(), initial_results))
 
@@ -160,32 +153,31 @@ async def search_barcode_all(
 
     coto_items = _safe(initial_results_map.get("coto_direct"))
     name_carrefour = initial_results_map.get("name_carrefour") if not isinstance(initial_results_map.get("name_carrefour"), Exception) else None
-    name_dia       = initial_results_map.get("name_dia")       if not isinstance(initial_results_map.get("name_dia"),       Exception) else None
-    name_jumbo     = initial_results_map.get("name_jumbo")     if not isinstance(initial_results_map.get("name_jumbo"),     Exception) else None
+    name_dia = initial_results_map.get("name_dia") if not isinstance(initial_results_map.get("name_dia"), Exception) else None
+    name_jumbo = initial_results_map.get("name_jumbo") if not isinstance(initial_results_map.get("name_jumbo"), Exception) else None
 
-    if not coto_items and "coto" in enabled_set and ctx is not None:
+    if not coto_items and "coto" in enabled_set:
         best_name = name_carrefour or name_dia or name_jumbo
         if best_name:
-            # acá podrías hacer un fallback por nombre si tenés esa función
-            # coto_items = await search_coto_by_name(ctx=ctx, q=best_name, limit=limit)
+            # Aquí va tu lógica de fallback para Coto si es necesaria
             pass
 
-    # --- FASE 2 ---
+    # --- FASE 2: BÚSQUEDA POR NOMBRES RESUELTOS EN PARALELO ---
     text_search_tasks = {
-        "carrefour": search(q=name_carrefour, limit=limit) if name_carrefour and "carrefour" in enabled_set else asyncio.sleep(0, result=[]),
-        "dia": search(q=name_dia, limit=limit) if name_dia and "dia" in enabled_set else asyncio.sleep(0, result=[]),
-        "jumbo": search(q=name_jumbo, limit=limit) if name_jumbo and "jumbo" in enabled_set else asyncio.sleep(0, result=[]),
+        "carrefour": search_carrefour(q=name_carrefour, limit=limit) if name_carrefour and "carrefour" in enabled_set else asyncio.sleep(0, result=[]),
+        "dia": search_dia(q=name_dia, limit=limit) if name_dia and "dia" in enabled_set else asyncio.sleep(0, result=[]),
+        "jumbo": search_jumbo(q=name_jumbo, limit=limit) if name_jumbo and "jumbo" in enabled_set else asyncio.sleep(0, result=[]),
     }
     text_search_results = await asyncio.gather(*text_search_tasks.values(), return_exceptions=True)
     text_search_results_map = dict(zip(text_search_tasks.keys(), text_search_results))
 
-    # --- FASE 3 ---
+    # --- FASE 3: UNIFICAR RESULTADOS ---
     buckets: Dict[str, List[SearchItem]] = {k: [] for k in ALLOWED}
-    if "coto" in enabled_set:      buckets["coto"]      = coto_items
+    if "coto" in enabled_set: buckets["coto"] = coto_items
     if "carrefour" in enabled_set: buckets["carrefour"] = _safe(text_search_results_map.get("carrefour"))
-    if "dia" in enabled_set:       buckets["dia"]       = _safe(text_search_results_map.get("dia"))
-    if "jumbo" in enabled_set:     buckets["jumbo"]     = _safe(text_search_results_map.get("jumbo"))
-
+    if "dia" in enabled_set: buckets["dia"] = _safe(text_search_results_map.get("dia"))
+    if "jumbo" in enabled_set: buckets["jumbo"] = _safe(text_search_results_map.get("jumbo"))
+    
     results_enabled = {k: buckets.get(k, []) for k in enabled_set}
     total = sum(len(v or []) for v in results_enabled.values())
 
