@@ -172,17 +172,9 @@ async def search_barcode_all(
 
     # --- FASE 2 ---
     text_search_tasks = {
-<<<<<<< HEAD
-        "carrefour": search_carrefour(q=name_carrefour, limit=limit) if name_carrefour and "carrefour" in enabled_set else asyncio.sleep(0, result=[]),
-        "dia":       search_dia(q=name_dia,           limit=limit)   if name_dia       and "dia"       in enabled_set else asyncio.sleep(0, result=[]),
-        "jumbo":     search_jumbo(q=name_jumbo,       limit=limit)   if name_jumbo     and "jumbo"     in enabled_set else asyncio.sleep(0, result=[]),
-        # si alguno de estos también requiere ctx, pasalo igual:
-        # "carrefour": search_carrefour(ctx=ctx, q=name_carrefour, limit=limit) ...
-=======
         "carrefour": search(q=name_carrefour, limit=limit) if name_carrefour and "carrefour" in enabled_set else asyncio.sleep(0, result=[]),
         "dia": search(q=name_dia, limit=limit) if name_dia and "dia" in enabled_set else asyncio.sleep(0, result=[]),
         "jumbo": search(q=name_jumbo, limit=limit) if name_jumbo and "jumbo" in enabled_set else asyncio.sleep(0, result=[]),
->>>>>>> f0cdf6dc3a2eadd13e22aa1ee80ba536d646eca2
     }
     text_search_results = await asyncio.gather(*text_search_tasks.values(), return_exceptions=True)
     text_search_results_map = dict(zip(text_search_tasks.keys(), text_search_results))
