@@ -1,7 +1,8 @@
 # app/routers/shopping.py
+from dataclasses import Field
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from app.db import get_db
+from app.db import Base, get_db
 from app.schemas.shopping_list import (
     ShoppingListCreate, ShoppingListRename, ShoppingListOut, ShoppingListDetail,
     ShoppingItemCreate, ShoppingItemUpdate, ShoppingItemOut
@@ -9,9 +10,13 @@ from app.schemas.shopping_list import (
 
 from app.repos.shopping_list_repo import (
     create_list, list_user_lists, get_user_list, rename_user_list, delete_user_list,
-    list_items, add_item, update_item, delete_item
+    list_items, add_item, update_item, delete_item, update_list_name
 )
 from app.dependencies.auth import get_current_user  
+
+class RenameIn(Base):
+    nombre: str = Field(min_length=1, max_length=120)
+
 
 router = APIRouter(prefix="/shopping", tags=["shopping"])
 
@@ -20,6 +25,14 @@ router = APIRouter(prefix="/shopping", tags=["shopping"])
 def create_shopping_list(payload: ShoppingListCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
     lst = create_list(db, user.id, payload.nombre)
     return ShoppingListOut(id=lst.id, nombre=lst.nombre, created_at=lst.created_at)
+
+@router.put("/{list_id}")
+def rename_list(list_id: int, payload: RenameIn, db: Session = Depends(get_db)):
+    out = update_list_name(db, list_id, payload.nombre.strip())
+    if not out:
+        raise HTTPException(status_code=404, detail="Lista no encontrada")
+    # devolver lo que tu front espera
+    return {"id": out.id, "nombre": out.nombre, "created_at": out.created_at, "updated_at": getattr(out, "updated_at", None)}
 
 @router.get("/lists", response_model=list[ShoppingListOut])
 def get_my_lists(db: Session = Depends(get_db), user=Depends(get_current_user)):

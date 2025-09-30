@@ -34,6 +34,21 @@ def create_list(db: Session, user_id: str, nombre: str) -> SimpleNamespace:
     db.commit()
     return _row_to_obj(res.fetchone())
 
+def update_list_name(db: Session, list_id: int, new_name: str) -> SimpleNamespace:
+    res = db.execute(
+        text(
+            """
+            UPDATE shopping_list
+            SET nombre = :new_name, updated_at = NOW()
+            WHERE id = :list_id
+            RETURNING id, nombre, created_at, updated_at
+            """
+        ),
+        {"list_id": list_id, "new_name": new_name},
+    )
+    db.commit()
+    row = res.fetchone()
+    return _row_to_obj(row) if row else None
 
 def list_user_lists(db: Session, user_id: str) -> List[SimpleNamespace]:
     res = db.execute(

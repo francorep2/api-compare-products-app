@@ -1,5 +1,6 @@
 # app/main.py
 from dotenv import load_dotenv, find_dotenv
+from scrapers.ctx import build_scrape_ctx
 load_dotenv(find_dotenv())  
 
 
@@ -59,6 +60,7 @@ async def lifespan(app):
 
 @app.on_event("startup")
 async def on_startup():  
+    app.state.scrape_ctx = await build_scrape_ctx()
     await browser_manager_async.startup(headless=True)
     Base.metadata.create_all(bind=engine)
 
