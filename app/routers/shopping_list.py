@@ -14,8 +14,7 @@ from app.repos.shopping_list_repo import (
 )
 from app.dependencies.auth import get_current_user  
 
-class RenameIn(Base):
-    nombre: str
+
 
 
 router = APIRouter(prefix="/shopping", tags=["shopping"])
@@ -27,7 +26,7 @@ def create_shopping_list(payload: ShoppingListCreate, db: Session = Depends(get_
     return ShoppingListOut(id=lst.id, nombre=lst.nombre, created_at=lst.created_at)
 
 @router.put("/{list_id}")
-def rename_list(list_id: int, payload: RenameIn, db: Session = Depends(get_db)):
+def rename_list(list_id: int, payload: ShoppingListRename, db: Session = Depends(get_db)):
     out = update_list_name(db, list_id, payload.nombre.strip())
     if not out:
         raise HTTPException(status_code=404, detail="Lista no encontrada")
