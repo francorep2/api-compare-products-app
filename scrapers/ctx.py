@@ -26,7 +26,7 @@ async def build_scrape_ctx(
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(headless=True)
     context = await browser.new_context(user_agent=user_agent)
-    age = await context.new_page()
+    page = await context.new_page()
     return ScrapeCtx(http=http, pw=pw, browser=browser, context=context, page=page)
 
 
