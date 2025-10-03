@@ -29,7 +29,7 @@ PROVIDERS: Dict[str, Callable[..., List[Dict]]] = {
 }
 
 PER_PROVIDER_TIMEOUT = 25   # segundos máx por tienda
-OVERALL_TIMEOUT = 70        # máx para toda la búsqueda
+OVERALL_TIMEOUT = 71        # máx para toda la búsqueda
 
 
 async def _invoke_provider(fn: Callable[..., List[Dict]],
