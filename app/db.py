@@ -13,7 +13,7 @@ def _pg_url():
     sslmode = os.getenv("DB_SSLMODE")  
     return f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{name}?sslmode={sslmode}"
 
-DATABASE_URL = os.getenv("DATABASE_URL", _pg_url())
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Engine con pool
 engine = create_engine(

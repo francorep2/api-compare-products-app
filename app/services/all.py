@@ -4,20 +4,28 @@ import asyncio
 import logging
 import inspect
 
-from app.services.coto import search_coto
-from app.services.carrefour import search
-from app.services.dia import search
-from app.services.jumbo import search
+from app.core.browser_async import browser_manager_async, DEFAULT_CTX
+
+# Usá alias para no pisar nombres:
+from app.services.carrefour import search as carrefour_search
+from app.services.dia import search as dia_search
+from app.services.jumbo import search as jumbo_search
+
+# Preferimos tu wrapper; si no existe, cargamos el search del scraper (que pide ctx)
+try:
+    from app.services.coto import search_coto as coto_search  # wrapper SIN ctx
+except Exception:
+    from scrapers.coto_scraper_async import search as coto_search  # core CON ctx
 
 log = logging.getLogger(__name__)
 
 HEAVY_PROVIDERS = {"carrefour", "dia"}
 
 PROVIDERS: Dict[str, Callable[..., List[Dict]]] = {
-    "carrefour": search,
-    "coto": search_coto,
-    "jumbo": search,
-    "dia": search,
+    "carrefour": carrefour_search,
+    "coto": coto_search,      # puede ser wrapper o core; ambos funcionarán
+    "jumbo": jumbo_search,
+    "dia": dia_search,
 }
 
 PER_PROVIDER_TIMEOUT = 15   # segundos máx por tienda
@@ -28,11 +36,36 @@ async def _invoke_provider(fn: Callable[..., List[Dict]],
                            q: Optional[str],
                            barcode: Optional[str],
                            limit: int):
-    """Llama al provider, async o sync."""
+    """
+    Llama al provider detectando si requiere 'ctx'.
+    Si el provider tiene un parámetro 'ctx' en su firma, abrimos un context Playwright acá.
+    """
+    sig = inspect.signature(fn)
+    params = sig.parameters
+
+    kwargs = {}
+    if "q" in params: kwargs["q"] = q
+    if "barcode" in params: kwargs["barcode"] = barcode
+    if "limit" in params: kwargs["limit"] = limit
+
+    # Debug opcional
+    try:
+        log.debug("[providers] calling %s.%s sig=%s kwargs=%s",
+                  getattr(fn, "__module__", "?"),
+                  getattr(fn, "__name__", "?"),
+                  str(sig), kwargs)
+    except Exception:
+        pass
+
+    if "ctx" in params:
+        async with browser_manager_async.new_context(**DEFAULT_CTX) as ctx:
+            kwargs["ctx"] = ctx
+            return await fn(**kwargs)
+
     if inspect.iscoroutinefunction(fn):
-        return await fn(q=q, barcode=barcode, limit=limit)
+        return await fn(**kwargs)
     else:
-        return await asyncio.to_thread(fn, q, barcode, limit)
+        return await asyncio.to_thread(lambda: fn(**kwargs))
 
 
 async def _run_provider(name: str,
