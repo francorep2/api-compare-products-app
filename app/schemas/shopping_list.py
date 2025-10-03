@@ -11,6 +11,7 @@ class ShoppingListCreate(BaseModel):
 
 class ShoppingListRename(BaseModel):
     nombre: str = Field(min_length=1)
+    
 
 class ShoppingItemBase(BaseModel):
     nombre: str = Field(min_length=1)
