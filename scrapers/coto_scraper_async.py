@@ -9,7 +9,27 @@ TOP_N = 3
 COTO_BASE = "https://www.cotodigital.com.ar"
 COTO_STATIC_HOST = "https://static.cotodigital3.com.ar"
 COTO_SUCURSAL_ID = 200
-CONCURRENCY_LIMIT = 4
+
+# ===================== Config de performance / timeouts =====================
+
+# Pensado para PER_PROVIDER_TIMEOUT ~ 25s en el orquestador
+SEARCH_BUDGET_S   = 12.0     # presupuesto total de búsqueda (grilla + algunos PDP)
+PAGE_GOTO_TIMEOUT = 8000     # ms navegación a la página de búsqueda
+SELECTOR_TIMEOUT  = 3000     # ms para waits de selectores
+PDP_GOTO_TIMEOUT  = 6000     # ms navegación a PDP
+PDP_TASK_TIMEOUT  = 6500     # ms timeout por cada PDP (asyncio.wait_for)
+CONCURRENCY_LIMIT = 3        # no abras más de 3 PDP en paralelo
+
+BLOCKED_DOMAINS = {
+    "googletagmanager.com", "google-analytics.com", "facebook.net", "doubleclick.net"
+}
+
+def should_block_request(route) -> bool:
+    # Bloquea recursos pesados + trackers
+    if route.request.resource_type in {"image", "stylesheet", "font", "media"}:
+        return True
+    url = route.request.url
+    return any(d in url for d in BLOCKED_DOMAINS)
 
 # ===================== Texto / matching =====================
 
@@ -402,13 +422,19 @@ def sanitize_coto_href(href:str) -> str:
     new_query = urllib.parse.urlencode(pairs, doseq=True)
     return f"{base}?{new_query}"
 
-async def fetch_coto_pdp(ctx, href, timeout=45000) -> Dict:
+async def fetch_coto_pdp(ctx, href, timeout=PDP_GOTO_TIMEOUT) -> Dict:
     page = await ctx.new_page()
     try:
+        # Bloqueo de recursos pesados
+        await ctx.route("**/*", lambda route: route.abort() if should_block_request(route) else route.continue_())
+        page.set_default_navigation_timeout(PDP_GOTO_TIMEOUT)
+        page.set_default_timeout(SELECTOR_TIMEOUT)
+
         url = absolutize(COTO_BASE, href)
         url = sanitize_coto_href(url)
         print(f"[LOG] PDP GET {url}")
-        await page.goto(url, wait_until="load", timeout=timeout)
+        # Más rápido que "load"
+        await page.goto(url, wait_until="domcontentloaded", timeout=PDP_GOTO_TIMEOUT)
 
         title = None
         for sel in ["h1[itemprop='name']", "h1.product-name", "h1", ".product-name"]:
@@ -448,10 +474,79 @@ async def fetch_coto_pdp(ctx, href, timeout=45000) -> Dict:
 
 async def fetch_pdp_with_semaphore(semaphore, ctx, href, card_promo):
     async with semaphore:
-        pdp_data = await fetch_coto_pdp(ctx, href)
+        try:
+            pdp_data = await asyncio.wait_for(fetch_coto_pdp(ctx, href), timeout=PDP_TASK_TIMEOUT / 1000)
+        except asyncio.TimeoutError:
+            return {}
         if pdp_data.get("promotion") is None and card_promo:
             pdp_data["promotion"] = card_promo
         return pdp_data
+
+async def quick_from_card(a_locator) -> Optional[Dict]:
+    """
+    Intenta armar el item directamente desde la tarjeta de grilla sin abrir PDP.
+    Devuelve dict con title/price/url/image_url/promotion o None si no alcanza.
+    """
+    try:
+        href = await a_locator.get_attribute("href")
+        if not href:
+            return None
+        # card contenedora
+        try:
+            card = a_locator.locator("xpath=ancestor::*[contains(@class,'product') or contains(@class,'summary') or contains(@class,'grid')][1]")
+        except:
+            card = None
+
+        # title
+        title = None
+        candidates = [
+            a_locator,  # a veces el <a> tiene el texto
+            card.locator("h3, h2, .product-name, .name, [class*='name']") if card else None
+        ]
+        for cand in candidates:
+            if not cand:
+                continue
+            try:
+                t = clean_text(await cand.inner_text())
+                if t and len(t) > 2:
+                    title = t
+                    break
+            except:
+                continue
+
+        # price
+        price = None
+        if card:
+            texts = []
+            for sel in [".price", ".product-price", "[class*='price']", "span:has-text('$')", "div:has-text('$')"]:
+                loc = card.locator(sel)
+                if await loc.count():
+                    try:
+                        texts.extend([clean_text(x) for x in await loc.all_inner_texts() if x])
+                    except:
+                        pass
+            price = normalize_price(" ".join([t for t in texts if t]))
+
+        if not title or not price:
+            return None
+
+        # image (estática por SKU si se puede)
+        sku = sku_from_url(href)
+        image_url = build_static_image_url(sku, size="large") if sku else None
+
+        promo = await extract_promotion_from_card(a_locator)
+        url = absolutize(COTO_BASE, href)
+
+        return {
+            "title": title,
+            "price": price,
+            "url": url,
+            "image_url": image_url,
+            "barcode": None,        # la grilla rara vez expone barcode
+            "promotion": promo,
+        }
+    except:
+        return None
 
 async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
     search_url = (
@@ -459,48 +554,93 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
         f"?_dyncharset=utf-8&Dy=1&Ntt={urllib.parse.quote(query)}&idSucursal={COTO_SUCURSAL_ID}"
     )
     page = await ctx.new_page()
+    start = time.monotonic()
+    deadline = start + SEARCH_BUDGET_S
     try:
-        print(f"[LOG] Coto Browser GET {search_url}")
-        await page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
+        # Bloqueo de recursos y timeouts
+        await ctx.route("**/*", lambda route: route.abort() if should_block_request(route) else route.continue_())
+        page.set_default_navigation_timeout(PAGE_GOTO_TIMEOUT)
+        page.set_default_timeout(SELECTOR_TIMEOUT)
 
-        await page.wait_for_selector("a[href*='/sitios/cdigi/productos/']", timeout=15000)
-        
-        await page.mouse.wheel(0, 500)
-        await asyncio.sleep(0.2)
+        print(f"[LOG] Coto Browser GET {search_url}")
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=PAGE_GOTO_TIMEOUT)
+        await page.wait_for_selector("a[href*='/sitios/cdigi/productos/']", timeout=SELECTOR_TIMEOUT)
+
+        # pequeño scroll para lazy-load
+        try:
+            await page.mouse.wheel(0, 600)
+            await asyncio.sleep(0.15)
+        except:
+            pass
 
         anchors = page.locator("a[href*='/sitios/cdigi/productos/']")
         total = await anchors.count()
         if not total:
             return []
 
-        hrefs_with_cardpromo: List[tuple[str, Optional[str]]] = []
+        hrefs_with_cardpromo: List[tuple[str, Optional[str], object]] = []  # (href, promo, anchor_locator)
         seen_hrefs = set()
-        take = min(total, limit * 4)
+        # pedimos un poco más que limit para cubrir descartes
+        take = min(total, max(limit * 3, 10))
         for i in range(take):
             a = anchors.nth(i)
             href = await a.get_attribute("href")
             if href and href not in seen_hrefs:
                 seen_hrefs.add(href)
                 card_promo = await extract_promotion_from_card(a)
-                hrefs_with_cardpromo.append((href, card_promo))
-        
-        if not hrefs_with_cardpromo:
-            return []
-
-        semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-        tasks = [fetch_pdp_with_semaphore(semaphore, ctx, href, card_promo) for href, card_promo in hrefs_with_cardpromo]
-        pdp_results = await asyncio.gather(*tasks)
+                hrefs_with_cardpromo.append((href, card_promo, a))
 
         results: List[Dict] = []
-        seen: set[str] = set()
-        for pdp in pdp_results:
-            if not pdp or not pdp.get("title"): continue
-            final_url = pdp.get("url")
-            if not final_url or final_url in seen: continue
-            seen.add(final_url)
+        seen_urls: set[str] = set()
+
+        # 1) Fast path: armar desde grilla sin PDP
+        for _, card_promo, a in hrefs_with_cardpromo:
+            if time.monotonic() > deadline:
+                break
+            quick = await quick_from_card(a)
+            if quick and quick.get("price") and quick.get("title"):
+                u = quick.get("url")
+                if u and u not in seen_urls:
+                    seen_urls.add(u)
+                    if not quick.get("promotion") and card_promo:
+                        quick["promotion"] = card_promo
+                    results.append(quick)
+                    if len(results) >= limit:
+                        return results[:limit]
+
+        # 2) PDP sólo para completar lo que falte
+        remaining = limit - len(results)
+        if remaining <= 0 or time.monotonic() > deadline:
+            return results[:limit]
+
+        semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+        tasks = []
+        for href, card_promo, _ in hrefs_with_cardpromo:
+            if time.monotonic() > deadline:
+                break
+            tasks.append(asyncio.create_task(fetch_pdp_with_semaphore(semaphore, ctx, href, card_promo)))
+
+        # Consumimos a medida que terminan y paramos al llegar al límite o al deadline
+        for coro in asyncio.as_completed(tasks, timeout=max(0.1, deadline - time.monotonic())):
+            try:
+                pdp = await coro
+            except Exception:
+                continue
+            if not pdp or not pdp.get("title"):
+                continue
+            u = pdp.get("url")
+            if not u or u in seen_urls:
+                continue
+            seen_urls.add(u)
             results.append(pdp)
-            if len(results) >= limit: break
-        
+            if len(results) >= limit or time.monotonic() > deadline:
+                break
+
+        # Cancelar tareas pendientes si ya tenemos suficiente
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+
         return results[:limit]
     except Exception as e:
         print(f"[LOG] Browser search error: {e}")
