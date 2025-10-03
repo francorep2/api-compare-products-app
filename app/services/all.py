@@ -4,20 +4,25 @@ import asyncio
 import logging
 import inspect
 
-from app.services.coto import search_coto
-from app.services.carrefour import search
-from app.services.dia import search
-from app.services.jumbo import search
+from typing import Dict, List, Optional, Callable
+import asyncio
+import logging
+import inspect
+
+from app.services.coto import search_coto as coto_search
+from app.services.carrefour import search as carrefour_search
+from app.services.dia import search as dia_search
+from app.services.jumbo import search as jumbo_search
 
 log = logging.getLogger(__name__)
 
 HEAVY_PROVIDERS = {"carrefour", "dia"}
 
 PROVIDERS: Dict[str, Callable[..., List[Dict]]] = {
-    "carrefour": search,
-    "coto": search_coto,
-    "jumbo": search,
-    "dia": search,
+    "carrefour": carrefour_search,
+    "coto": coto_search,
+    "jumbo": jumbo_search,
+    "dia": dia_search,
 }
 
 PER_PROVIDER_TIMEOUT = 15   # segundos máx por tienda

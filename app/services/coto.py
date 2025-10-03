@@ -1,18 +1,8 @@
-# app/services/coto.py (o donde esté tu service)
+# app/services/coto.py
 from typing import List, Dict, Optional
-from app.core.browser_async import browser_manager_async
-from scrapers.coto_scraper_async import search as coto_search
-
-DEFAULT_CTX = {
-    "locale": "es-AR",
-    "user_agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-    ),
-    "viewport": {"width": 1366, "height": 800},
-}
+from app.core.browser_async import browser_manager_async, DEFAULT_CTX
+from scrapers.coto_scraper_async import search as coto_core_search  # ESTE SÍ PIDE ctx
 
 async def search_coto(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
-    # Abrimos contexto Playwright acá y se lo pasamos al scraper
     async with browser_manager_async.new_context(**DEFAULT_CTX) as ctx:
-        return await coto_search(ctx, q=q, barcode=barcode, limit=limit)
+        return await coto_core_search(ctx, q=q, barcode=barcode, limit=limit)
