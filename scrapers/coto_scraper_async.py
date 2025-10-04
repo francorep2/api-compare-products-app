@@ -224,18 +224,19 @@ async def _search_fallback_html(playwright, q: str) -> List[CotoItem]:
     return []
 
 # ===================== Entry point =====================
-async def search_coto(q: str, limit: int = TOP_N) -> List[Dict[str, Any]]:
-    """
-    Retorna: List[ { title, price (string "ARS ..."), url, image_url, barcode, promotion|null } ]
-    Hard cutoff 11.5s para evitar exceder los 15s del orquestador.
-    """
+async def search_coto(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = TOP_N) -> List[Dict[str, Any]]:
+
     async def _run(playwright):
+        query = barcode if barcode else q  # usa barcode como query si viene
+        if not query:
+            return []
+
         try:
-            items = await _search_fast_json(playwright, q)
+            items = await _search_fast_json(playwright, query)
             if not items:
-                items = await _search_fallback_html(playwright, q)
+                items = await _search_fallback_html(playwright, query)
         except Exception:
-            items = await _search_fallback_html(playwright, q)
+            items = await _search_fallback_html(playwright, query)
 
         out = []
         for it in items[:limit]:
@@ -255,5 +256,4 @@ async def search_coto(q: str, limit: int = TOP_N) -> List[Dict[str, Any]]:
         async with async_playwright() as pw:
             return await asyncio.wait_for(_run(pw), timeout=HARD_TIMEOUT_SEC)
     except asyncio.TimeoutError:
-        # salimos con vacío antes de que el agregador nos corte
         return []
