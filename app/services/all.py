@@ -1,6 +1,6 @@
 import asyncio
 from fastapi import APIRouter
-from scrapers.coto_scraper_async import search_coto
+from services.coto import search_coto
 from scrapers.carrefour_scraper_async import search_carrefour
 from scrapers.dia_scraper_async import search as search_dia
 from scrapers.jumbo_scraper_async import search as search_jumbo
