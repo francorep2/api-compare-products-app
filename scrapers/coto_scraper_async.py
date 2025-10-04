@@ -140,15 +140,13 @@ def _extract_ldjson_items(html: str) -> List[CotoItem]:
             break
     return items[:TOP_N]
 
-
 async def _search_fast_json(playwright, q: str) -> List[CotoItem]:
     SEARCH_ENDPOINTS = [
         f"{COTO_BASE}/api/search?query={{q}}&store={COTO_SUCURSAL_ID}&page=1&size=24",
         f"{COTO_BASE}/api/catalog/search?q={{q}}&branchId={COTO_SUCURSAL_ID}&from=0&size=24",
     ]
 
-    # ✅ crear el contexto con await
-    req_ctx = await playwright.request.new_context(
+    req = await playwright.request.new_context(
         base_url=COTO_BASE,
         extra_http_headers={
             "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -157,7 +155,7 @@ async def _search_fast_json(playwright, q: str) -> List[CotoItem]:
         },
         timeout=8_000,
     )
-    async with req_ctx as req:
+    try:
         last_err = None
         for raw in SEARCH_ENDPOINTS:
             url = raw.format(q=quote_plus(q))
@@ -182,7 +180,9 @@ async def _search_fast_json(playwright, q: str) -> List[CotoItem]:
                     await asyncio.sleep(0.2 * (attempt + 1))
         if last_err:
             raise RuntimeError(f"search_fast_json failed: {last_err}")
-    return []
+        return []
+    finally:
+        await req.dispose()
 
 async def _search_fallback_html(playwright, q: str) -> List[CotoItem]:
     paths = [
@@ -190,8 +190,7 @@ async def _search_fallback_html(playwright, q: str) -> List[CotoItem]:
         f"/busqueda?q={quote_plus(q)}",
         f"/buscar?q={quote_plus(q)}",
     ]
-
-    req_ctx = await playwright.request.new_context(
+    req = await playwright.request.new_context(
         base_url=COTO_BASE,
         extra_http_headers={
             "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -200,7 +199,7 @@ async def _search_fallback_html(playwright, q: str) -> List[CotoItem]:
         },
         timeout=7_000,
     )
-    async with req_ctx as req:
+    try:
         for path in paths:
             try:
                 resp = await req.get(path)
@@ -213,7 +212,10 @@ async def _search_fallback_html(playwright, q: str) -> List[CotoItem]:
                     return items[:TOP_N]
             except Exception:
                 continue
-    return []
+        return []
+    finally:
+        await req.dispose()
+
 
 
 # ===================== Entry point =====================

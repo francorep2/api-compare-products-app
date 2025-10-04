@@ -23,9 +23,22 @@ class AsyncBrowserManager:
         async with self._lock:
             if self._pw is None:
                 self._pw = await async_playwright().start()
-            # Si el browser no existe o está desconectado, relanzar
-            if self._browser is None or getattr(self._browser, "is_connected", lambda: False)() is False:
-                self._browser = await self._pw.chromium.launch(headless=True)
+            if self._browser is None or not self._browser.is_connected():
+                # Flags recomendados para Koyeb/containers
+                self._browser = await self._pw.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-dev-shm-usage"],
+                )
+
+    async def _restart_browser(self):
+        async with self._lock:
+            if self._browser:
+                try:
+                    await self._browser.close()
+                except Exception:
+                    pass
+                self._browser = None
+            await self._ensure_started()
 
     async def startup(self):
         await self._ensure_started()
@@ -33,32 +46,42 @@ class AsyncBrowserManager:
     async def shutdown(self):
         async with self._lock:
             if self._browser:
-                await self._browser.close()
+                try:
+                    await self._browser.close()
+                except Exception:
+                    pass
                 self._browser = None
             if self._pw:
-                await self._pw.stop()
+                try:
+                    await self._pw.stop()
+                except Exception:
+                    pass
                 self._pw = None
 
     @asynccontextmanager
     async def new_context(self, **ctx_options):
+        """Crea un BrowserContext y lo cierra SIEMPRE, incluso si hay excepción."""
         await self._ensure_started()
         await self._ctx_sem.acquire()
         context = None
         try:
-            context = await self._browser.new_context(**ctx_options)
-            yield context
-        except Exception:
-            # Si falla por browser cerrado, intentar una vez recrear y reintentar
+            # 1er intento
             try:
-                await self._ensure_started()
                 context = await self._browser.new_context(**ctx_options)
+            except Exception:
+                # Recrea browser y reintenta ANTES del yield
+                await self._restart_browser()
+                context = await self._browser.new_context(**ctx_options)
+
+            # ÚNICO yield del context manager
+            try:
                 yield context
             finally:
                 if context:
-                    await context.close()
-        else:
-            if context:
-                await context.close()
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
         finally:
             self._ctx_sem.release()
 
