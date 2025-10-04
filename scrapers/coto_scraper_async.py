@@ -1,38 +1,23 @@
-from typing import List, Dict, Optional
-import json, urllib.parse, re, time, datetime, os, asyncio, unicodedata
-
-from scrapers._utils_promos import PROMO_NORMALIZER
-
-# ===================== Config =====================
+# scrapers_async/coto_scraper_async.py
+from __future__ import annotations
+from typing import List, Dict, Optional, Any
+import asyncio, re, json, unicodedata
+from urllib.parse import quote_plus
+from dataclasses import dataclass
 
 TOP_N = 3
 COTO_BASE = "https://www.cotodigital.com.ar"
 COTO_STATIC_HOST = "https://static.cotodigital3.com.ar"
 COTO_SUCURSAL_ID = 200
+HARD_TIMEOUT_SEC = 11.5  # para no pasarnos del límite 15s arriba
 
-# ===================== Config de performance / timeouts =====================
+try:
+    from scrapers._utils_promos import PROMO_NORMALIZER
+except Exception:
+    def PROMO_NORMALIZER(text: Optional[str]) -> Optional[str]:
+        return text
 
-# Pensado para PER_PROVIDER_TIMEOUT ~ 25s en el orquestador
-SEARCH_BUDGET_S   = 12.0     # presupuesto total de búsqueda (grilla + algunos PDP)
-PAGE_GOTO_TIMEOUT = 8000     # ms navegación a la página de búsqueda
-SELECTOR_TIMEOUT  = 3000     # ms para waits de selectores
-PDP_GOTO_TIMEOUT  = 6000     # ms navegación a PDP
-PDP_TASK_TIMEOUT  = 6500     # ms timeout por cada PDP (asyncio.wait_for)
-CONCURRENCY_LIMIT = 3        # no abras más de 3 PDP en paralelo
-
-BLOCKED_DOMAINS = {
-    "googletagmanager.com", "google-analytics.com", "facebook.net", "doubleclick.net"
-}
-
-def should_block_request(route) -> bool:
-    # Bloquea recursos pesados + trackers
-    if route.request.resource_type in {"image", "stylesheet", "font", "media"}:
-        return True
-    url = route.request.url
-    return any(d in url for d in BLOCKED_DOMAINS)
-
-# ===================== Texto / matching =====================
-
+# ---------------- Texto helpers ----------------
 def _norm_text(s: str) -> str:
     s = s.lower().strip()
     s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
@@ -44,627 +29,231 @@ def _title_seems_related(title: str, q: str) -> bool:
     t = _norm_text(title)
     s = _norm_text(q)
     must = []
-    if "cofler" in s: must.append("cofler")
-    for k in ("galletita", "galletitas", "cookie", "cookies"):
-        if k in s:
-            must.append(k)
-            break
-    for k in ("chocolate", "chips"):
-        if k in s: must.append(k)
-    ok = sum(1 for m in must if m in t)
-    return ok >= max(2, len(must) - 1)
+    # Heurística simple: todas las palabras de q deben aparecer
+    for w in s.split():
+        if w and w not in t:
+            return False
+    return True
 
-# ===================== Utils comunes (sync) =====================
+# ---------------- Parsing helpers ----------------
+@dataclass
+class CotoItem:
+    title: str
+    price: Optional[str]
+    url: str
+    image_url: Optional[str]
+    barcode: Optional[str]
+    promotion: Optional[str]
 
-def clean_text(s: Optional[str]) -> Optional[str]:
-    if not s: return None
-    return re.sub(r"\s+", " ", s).strip()
-
-def normalize_price(text: Optional[str]) -> Optional[str]:
-    if not text: return None
-    t = text.replace("\xa0", " ").strip()
-    cand = []
-    for ent, dec in re.findall(r'(?:\$|ARS)\s*([0-9]{1,3}(?:[.\s][0-9]{3})+|[0-9]{4,})(?:,([0-9]{2}))?', t, flags=re.I):
-        ent_clean = ent.replace(".", "").replace(" ", "")
-        try: cand.append(float(f"{ent_clean}.{dec or '00'}"))
-        except: pass
-    for ent, dec in re.findall(r'(?:\$|ARS)\s*([0-9]{1,4})\s+([0-9]{2})', t, flags=re.I):
-        try: cand.append(float(f"{int(ent)}.{dec}"))
-        except: pass
-    for ent, dec in re.findall(r'([0-9]{1,3}(?:[.\s][0-9]{3})*|[0-9]{1,4}),([0-9]{2})', t):
-        ent_clean = ent.replace(".", "").replace(" ", "")
-        try: cand.append(float(f"{int(ent_clean)}.{dec}"))
-        except: pass
-    for ent in re.findall(r'\b([0-9]{4,})\b', t):
-        try: cand.append(float(int(ent)))
-        except: pass
-    if not cand: return None
-    return f"ARS {max(cand):.2f}"
-
-async def save_debug_html(page, tag: str):
-    try:
-        os.makedirs("debug", exist_ok=True)
-        html = await page.content()
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join("debug", f"{tag}_{ts}.html")
-        with open(path, "w", encoding="utf-8") as f: f.write(html)
-        print(f"[LOG] Guardado HTML: {path}")
-    except Exception as e:
-        print("[LOG] No pude guardar HTML:", e)
-
-def absolutize(base: str, href: str, current_url: Optional[str] = None) -> str:
-    if not href: return current_url or base
-    if href.startswith("http"): return href
-    parts = base.split("/", 3)
-    path = href if href.startswith("/") else ("/"+href)
-    return f"{parts[0]}//{parts[2]}{path}"
-
-def _digits(s: Optional[str]) -> str:
-    return re.sub(r"\D", "", s or "")
-
-def normalize_barcode(s: Optional[str]) -> Optional[str]:
-    d = _digits(s)
-    return d if 8 <= len(d) <= 14 else None
-
-def choose_barcode(*cands) -> Optional[str]:
-    for c in cands:
-        d = normalize_barcode(str(c) if c is not None else None)
-        if d: return d
-    return None
-
-async def _compute_discount_from_prices(page) -> Optional[str]:
-    try:
-        html = await page.content()
-        m_reg = re.search(r'Precio\s+regular\s*:\s*\$?\s*([\d\.\s]+),(\d{2})', html, flags=re.I)
-        m_all = re.findall(r'\$\s*([\d\.\s]+),(\d{2})', html, flags=re.I)
-        if m_reg and m_all:
-            ent_reg, dec_reg = m_reg.group(1), m_reg.group(2)
-            reg = float(ent_reg.replace(".", "").replace(" ", "") + "." + dec_reg)
-            candidates = []
-            for ent, dec in m_all:
-                try:
-                    val = float(ent.replace(".", "").replace(" ", "") + "." + dec)
-                    candidates.append(val)
-                except:
-                    pass
-            if not candidates: return None
-            current = min((v for v in candidates if v < reg), default=None)
-            if current is None: current = min(candidates)
-            if reg > 0 and current is not None and current < reg:
-                pct = round((reg - current) / reg * 100)
-                if 1 <= pct <= 95: return f"{pct}% DTO"
-    except Exception:
-        pass
-    return None
-
-# ===================== Promos (badges) =====================
-
-GRID_BADGE_SELECTORS = [
-    "[class*='flagName']", "[class*='flagText']", "[class*='productHighlightText']",
-    "[class*='discount']", "[data-testid*='discount']", "[data-testid*='badge']",
-    ".badge", ".flags", ".tag", ".promo", ".promotion", ".product-flag",
-    "span:has-text('OFERTA')", "span:has-text('Dto')", "strong:has-text('OFERTA')"
-]
-
-def _pick_best_promo_text(text: str) -> Optional[str]:
-    if not text: return None
-    txt = re.sub(r"\s+", " ", text).strip()
-    m = PROMO_NORMALIZER.search(txt)
-    if not m: return None
-    hit = m.group(0).upper().replace("  ", " ").strip()
-    hit = hit.replace("DESCUENTO", "DTO").replace("%OFF", "% OFF")
-    return hit
-
-async def extract_promotion_from_dom_page(page) -> Optional[str]:
-    COTO_BADGE_SELECTORS = [
-        ".promo", ".promotion", ".badge", ".flags", ".product-flag", ".ribbon",
-        "[class*='promo']", "[class*='Promotion']", "[class*='badge']",
-        ".descuento", ".beneficio", ".ahorro", ".etiqueta", ".label",
-        ".tag", ".tag-oferta", ".tag-descuento", ".product__badge",
-        ".prod__promo", ".prod__flag", ".product-promotion",
-        "span:has-text('OFERTA')", "strong:has-text('OFERTA')", "span:has-text('Dto')"
-    ]
-    def _try_pick(txts: list[str]) -> Optional[str]:
-        txt = " | ".join(t for t in txts if t)
-        m_pct = re.search(r'\b(\d{1,3})\s*%', txt, flags=re.I)
-        if m_pct: return f"{m_pct.group(1)}% DTO"
-        return _pick_best_promo_text(txt)
-    for sel in COTO_BADGE_SELECTORS:
-        try:
-            loc = page.locator(sel)
-            if await loc.count():
-                texts = [t.strip() for t in await loc.all_inner_texts() if t and t.strip()]
-                try:
-                    first = loc.first
-                    for attr in ("aria-label", "title"):
-                        val = await first.get_attribute(attr)
-                        if val: texts.append(val.strip())
-                except: pass
-                promo = _try_pick(texts)
-                if promo: return promo
-        except: continue
-    try:
-        price_zone = page.locator("xpath=//*[contains(@class,'price') or contains(@class,'precio') or contains(@class,'product-price')][1]")
-        if await price_zone.count():
-            texts = [t.strip() for t in await price_zone.all_inner_texts() if t and t.strip()]
-            promo = _try_pick(texts)
-            if promo: return promo
-    except: pass
-    calc = await _compute_discount_from_prices(page)
-    if calc: return calc
-    try:
-        body_txt = await page.inner_text("body")
-        return _try_pick([body_txt])
-    except: return None
-
-async def extract_promotion_from_card(card_locator) -> Optional[str]:
-    try:
-        card = card_locator.locator("xpath=ancestor::*[contains(@class,'product') or contains(@class,'summary') or contains(@class,'grid')][1]")
-    except:
-        card = card_locator
-    for sel in GRID_BADGE_SELECTORS:
-        try:
-            loc = card.locator(sel)
-            if await loc.count():
-                texts = [t.strip() for t in await loc.all_inner_texts() if t.strip()]
-                if texts:
-                    compact = " | ".join(dict.fromkeys(texts))
-                    best = _pick_best_promo_text(compact)
-                    if best: return best
-        except: continue
-    return None
-
-# ===================== Parsers async =====================
-
-async def parse_jsonld_product(page):
-    scripts = page.locator("script[type='application/ld+json']")
-    count = await scripts.count()
-    for i in range(count):
-        try:
-            raw = (await scripts.nth(i).inner_text()).strip()
-            data = json.loads(raw)
-            items = data if isinstance(data, list) else [data]
-            for it in items:
-                if isinstance(it, dict) and ("Product" in str(it.get("@type"))):
-                    name = it.get("name")
-                    offers = it.get("offers")
-                    price = None
-                    if isinstance(offers, list) and offers:
-                        offers = offers[0]
-                    if isinstance(offers, dict):
-                        p = offers.get("price")
-                        if p:
-                            try: price = float(str(p).replace(",", "."))
-                            except: price = None
-                    image = it.get("image")
-                    if isinstance(image, list) and image:
-                        image = image[0]
-                    gtin = choose_barcode(it.get("gtin13"), it.get("gtin14"), it.get("gtin"), it.get("sku"))
-                    return {
-                        "title": clean_text(name) if name else None,
-                        "price": f"ARS {price:.2f}" if price is not None else None,
-                        "image": image or None,
-                        "barcode": gtin or None,
-                    }
-        except:
-            pass
-    return None
-
-async def parse_meta_price_dom(page) -> Optional[str]:
-    for sel in ["meta[itemprop='price']", "meta[property='product:price:amount']"]:
-        el = page.locator(sel).first
-        if await el.count():
-            val = await el.get_attribute("content")
-            if val:
-                try: return f"ARS {float(str(val).replace(',','.')):.2f}"
-                except: pass
-    for cont_sel in ["#skuBestPrice", ".skuBestPrice", ".best-price", ".bestPrice", ".price", ".new-price"]:
-        cont = page.locator(cont_sel).first
-        if not await cont.count():
-            continue
-        val_el = cont.locator(".val").first
-        dec_el = cont.locator(".dec").first
-        if await val_el.count():
-            entero = (await val_el.inner_text() or "").strip()
-            dec = (await dec_el.inner_text() or "").strip() if await dec_el.count() else "00"
-            pr = normalize_price(f"$ {entero},{dec}")
-            if pr: return pr
-        pr = normalize_price(clean_text(await cont.inner_text()))
-        if pr: return pr
-    for sel in ["span:has-text('$')", "div:has-text('$')"]:
-        el = page.locator(sel).first
-        if await el.count():
-            pr = normalize_price(clean_text(await el.inner_text()))
-            if pr: return pr
-    try:
-        has = await page.evaluate("() => typeof window.skuJson !== 'undefined'")
-        if has:
-            data = await page.evaluate("() => window.skuJson")
-            if isinstance(data, dict):
-                for s in (data.get("skus") or []):
-                    bp = s.get("bestPrice")
-                    if bp: return f"ARS {float(bp)/100:.2f}"
-    except:
-        pass
-    return None
-
-async def parse_regex_from_html(page) -> Optional[str]:
-    html = await page.content()
-    m = re.findall(r"(?:\$|ARS)\s*[\d\. ]{1,}(?:,\d{2})?", html, flags=re.I)
-    best = None
-    for s in m:
-        pr = normalize_price(s)
-        if pr:
-            val = float(pr.replace("ARS","").replace("$","").strip())
-            if not best or val > best[0]:
-                best = (val, pr)
-    return best[1] if best else None
-
-# ===================== Imagen estática Coto =====================
-
-STATIC_IMG_REGEX = re.compile(
-    r"https?://static\.cotodigital(?:3)?\.com\.ar/sitios/fotos/(?:large|medium|small)/[0-9]{8}/[0-9]{8}\.jpg",
-    re.IGNORECASE
-)
-
-def sku_from_url(url: str) -> Optional[str]:
-    m = re.search(r"/R-([0-9]{8})-", url)
-    return m.group(1) if m else None
-
-def folder_from_sku(sku: str) -> Optional[str]:
-    if not sku or len(sku) != 8: return None
-    return sku[:-2] + "00"
-
-def build_static_image_url(sku: str, size="large") -> Optional[str]:
-    folder = folder_from_sku(sku)
-    if not folder: return None
-    return f"{COTO_STATIC_HOST}/sitios/fotos/{size}/{folder}/{sku}.jpg"
-
-async def extract_static_image_from_html(page) -> Optional[str]:
-    html = await page.content()
-    m = STATIC_IMG_REGEX.search(html)
-    return m.group(0) if m else None
-
-async def extract_image_url(page, final_url) -> Optional[str]:
-    url = await extract_static_image_from_html(page)
-    if url: return url
-    sku = sku_from_url(final_url)
-    if sku:
-        built = build_static_image_url(sku, size="large")
-        if built: return built
-    try:
-        jl = await parse_jsonld_product(page)
-        if jl and jl.get("image"):
-            return absolutize(COTO_BASE, jl["image"])
-    except: pass
-    for sel in ["meta[property='og:image']", "meta[name='twitter:image']", "meta[property='og:image:url']"]:
-        el = page.locator(sel).first
-        if await el.count():
-            src = await el.get_attribute("content")
-            if src and "cotodigital" in src:
-                return absolutize(COTO_BASE, src)
-    el = page.locator("link[rel='image_src']").first
-    if await el.count():
-        src = await el.get_attribute("href")
-        if src and "cotodigital" in src:
-            return absolutize(COTO_BASE, src)
-    for sel in ["img[itemprop='image']", ".product-image img", ".image-gallery img", "img"]:
-        el = page.locator(sel).first
-        if await el.count():
-            for attr in ["src", "data-src", "data-lazy", "data-original"]:
-                src = await el.get_attribute(attr)
-                if src and "cotodigital" in src:
-                    return absolutize(COTO_BASE, src)
-    return None
-
-# ===================== EAN extractors =====================
-
-async def extract_barcode_from_datalayer_or_html(page) -> Optional[str]:
-    try:
-        has_dl = await page.evaluate("() => Array.isArray(window.dataLayer)")
-        if has_dl:
-            arr = await page.evaluate("() => window.dataLayer")
-            for it in arr:
-                if isinstance(it, dict):
-                    for k in ("ean","gtin","gtin13","productEAN","productGtin","codigoBarras","barcode"):
-                        val = it.get(k)
-                        d = normalize_barcode(val if val is not None else None)
-                        if d: return d
-    except: pass
-    try:
-        html = await page.content()
-        for raw in re.findall(r'<script[^>]+ld\+json[^>]*>(.*?)</script>', html, flags=re.S|re.I):
-            try: data = json.loads(raw)
-            except: continue
-            stack = [data]
-            while stack:
-                it = stack.pop()
-                if isinstance(it, dict):
-                    t = it.get("@type")
-                    if "Product" in (t if isinstance(t, str) else str(t)):
-                        bc = choose_barcode(it.get("gtin13"), it.get("gtin14"), it.get("gtin"), it.get("sku"))
-                        if bc: return bc
-                    stack.extend(it.values())
-                elif isinstance(it, list):
-                    stack.extend(it)
-    except: pass
-    try:
-        txt = await page.content()
-        nums = re.findall(r'\b(\d{8,14})\b', txt)
-        for pref in (14, 13, 12, 8):
-            for n in nums:
-                if len(n) == pref:
-                    d = normalize_barcode(n)
-                    if d: return d
-    except: pass
-    return None
-
-# ===================== PDP/Search =====================
-
-def sanitize_coto_href(href:str) -> str:
-    s = urllib.parse.unquote(href)
-    while "&&" in s: s = s.replace("&&", "&")
-    s = s.replace("?&", "?")
-    if "?" in s:
-        base, query = s.split("?", 1)
-    else:
-        base, query = s, ""
-    q = urllib.parse.parse_qs(query, keep_blank_values=True)
-    if "Dy" not in q: q["Dy"] = ["1"]
-    if "idSucursal" not in q: q["idSucursal"] = [str(COTO_SUCURSAL_ID)]
-    pairs = []
-    for k in ["Dy", "idSucursal"]:
-        if k in q:
-            for v in q[k]: pairs.append((k,v))
-            del q[k]
-    for k,vs in q.items():
-        for v in vs: pairs.append((k,v))
-    new_query = urllib.parse.urlencode(pairs, doseq=True)
-    return f"{base}?{new_query}"
-
-async def fetch_coto_pdp(ctx, href, timeout=PDP_GOTO_TIMEOUT) -> Dict:
-    page = await ctx.new_page()
-    try:
-        # Bloqueo de recursos pesados
-        await ctx.route("**/*", lambda route: route.abort() if should_block_request(route) else route.continue_())
-        page.set_default_navigation_timeout(PDP_GOTO_TIMEOUT)
-        page.set_default_timeout(SELECTOR_TIMEOUT)
-
-        url = absolutize(COTO_BASE, href)
-        url = sanitize_coto_href(url)
-        print(f"[LOG] PDP GET {url}")
-        # Más rápido que "load"
-        await page.goto(url, wait_until="domcontentloaded", timeout=PDP_GOTO_TIMEOUT)
-
-        title = None
-        for sel in ["h1[itemprop='name']", "h1.product-name", "h1", ".product-name"]:
-            el = page.locator(sel).first
-            if await el.count():
-                t = clean_text(await el.inner_text())
-                if t and len(t) > 2:
-                    title = t
-                    break
-
-        price = None
-        jl = await parse_jsonld_product(page)
-        if jl:
-            price = jl.get("price") or price
-            if jl.get("title") and not title:
-                title = jl["title"]
-        if not price: price = await parse_meta_price_dom(page)
-        if not price: price = await parse_regex_from_html(page)
-        if not title: title = clean_text(await page.title())
-
-        image_url = await extract_image_url(page, url)
-        barcode = jl.get("barcode") if jl and jl.get("barcode") else None
-        if not barcode:
-            barcode = await extract_barcode_from_datalayer_or_html(page)
-        promotion = await extract_promotion_from_dom_page(page)
-
-        return {
-            "title": title, "price": price, "url": url, "image_url": image_url,
-            "barcode": barcode, "promotion": promotion,
-        }
-    except Exception as e:
-        print(f"[LOG] PDP error Coto: {e}")
-        await save_debug_html(page, "coto_pdp_error")
-        return {"title": None, "price": None, "url": href, "image_url": None, "barcode": None, "promotion": None}
-    finally:
-        await page.close()
-
-async def fetch_pdp_with_semaphore(semaphore, ctx, href, card_promo):
-    async with semaphore:
-        try:
-            pdp_data = await asyncio.wait_for(fetch_coto_pdp(ctx, href), timeout=PDP_TASK_TIMEOUT / 1000)
-        except asyncio.TimeoutError:
-            return {}
-        if pdp_data.get("promotion") is None and card_promo:
-            pdp_data["promotion"] = card_promo
-        return pdp_data
-
-async def quick_from_card(a_locator) -> Optional[Dict]:
-    """
-    Intenta armar el item directamente desde la tarjeta de grilla sin abrir PDP.
-    Devuelve dict con title/price/url/image_url/promotion o None si no alcanza.
-    """
-    try:
-        href = await a_locator.get_attribute("href")
-        if not href:
-            return None
-        # card contenedora
-        try:
-            card = a_locator.locator("xpath=ancestor::*[contains(@class,'product') or contains(@class,'summary') or contains(@class,'grid')][1]")
-        except:
-            card = None
-
-        # title
-        title = None
-        candidates = [
-            a_locator,  # a veces el <a> tiene el texto
-            card.locator("h3, h2, .product-name, .name, [class*='name']") if card else None
-        ]
-        for cand in candidates:
-            if not cand:
-                continue
-            try:
-                t = clean_text(await cand.inner_text())
-                if t and len(t) > 2:
-                    title = t
-                    break
-            except:
-                continue
-
-        # price
-        price = None
-        if card:
-            texts = []
-            for sel in [".price", ".product-price", "[class*='price']", "span:has-text('$')", "div:has-text('$')"]:
-                loc = card.locator(sel)
-                if await loc.count():
-                    try:
-                        texts.extend([clean_text(x) for x in await loc.all_inner_texts() if x])
-                    except:
-                        pass
-            price = normalize_price(" ".join([t for t in texts if t]))
-
-        if not title or not price:
-            return None
-
-        # image (estática por SKU si se puede)
-        sku = sku_from_url(href)
-        image_url = build_static_image_url(sku, size="large") if sku else None
-
-        promo = await extract_promotion_from_card(a_locator)
-        url = absolutize(COTO_BASE, href)
-
-        return {
-            "title": title,
-            "price": price,
-            "url": url,
-            "image_url": image_url,
-            "barcode": None,        # la grilla rara vez expone barcode
-            "promotion": promo,
-        }
-    except:
+def _to_search_item(raw: Dict[str, Any]) -> Optional[CotoItem]:
+    title = raw.get("title") or raw.get("name") or ""
+    if not title:
         return None
+    url = raw.get("url") or raw.get("permalink") or ""
+    if url and url.startswith("/"):
+        url = COTO_BASE + url
 
-async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
-    search_url = (
-        f"{COTO_BASE}/sitios/cdigi/categoria"
-        f"?_dyncharset=utf-8&Dy=1&Ntt={urllib.parse.quote(query)}&idSucursal={COTO_SUCURSAL_ID}"
-    )
-    page = await ctx.new_page()
-    start = time.monotonic()
-    deadline = start + SEARCH_BUDGET_S
-    try:
-        # Bloqueo de recursos y timeouts
-        await ctx.route("**/*", lambda route: route.abort() if should_block_request(route) else route.continue_())
-        page.set_default_navigation_timeout(PAGE_GOTO_TIMEOUT)
-        page.set_default_timeout(SELECTOR_TIMEOUT)
-
-        print(f"[LOG] Coto Browser GET {search_url}")
-        await page.goto(search_url, wait_until="domcontentloaded", timeout=PAGE_GOTO_TIMEOUT)
-        await page.wait_for_selector("a[href*='/sitios/cdigi/productos/']", timeout=SELECTOR_TIMEOUT)
-
-        # pequeño scroll para lazy-load
-        try:
-            await page.mouse.wheel(0, 600)
-            await asyncio.sleep(0.15)
-        except:
-            pass
-
-        anchors = page.locator("a[href*='/sitios/cdigi/productos/']")
-        total = await anchors.count()
-        if not total:
-            return []
-
-        hrefs_with_cardpromo: List[tuple[str, Optional[str], object]] = []  # (href, promo, anchor_locator)
-        seen_hrefs = set()
-        # pedimos un poco más que limit para cubrir descartes
-        take = min(total, max(limit * 3, 10))
-        for i in range(take):
-            a = anchors.nth(i)
-            href = await a.get_attribute("href")
-            if href and href not in seen_hrefs:
-                seen_hrefs.add(href)
-                card_promo = await extract_promotion_from_card(a)
-                hrefs_with_cardpromo.append((href, card_promo, a))
-
-        results: List[Dict] = []
-        seen_urls: set[str] = set()
-
-        # 1) Fast path: armar desde grilla sin PDP
-        for _, card_promo, a in hrefs_with_cardpromo:
-            if time.monotonic() > deadline:
-                break
-            quick = await quick_from_card(a)
-            if quick and quick.get("price") and quick.get("title"):
-                u = quick.get("url")
-                if u and u not in seen_urls:
-                    seen_urls.add(u)
-                    if not quick.get("promotion") and card_promo:
-                        quick["promotion"] = card_promo
-                    results.append(quick)
-                    if len(results) >= limit:
-                        return results[:limit]
-
-        # 2) PDP sólo para completar lo que falte
-        remaining = limit - len(results)
-        if remaining <= 0 or time.monotonic() > deadline:
-            return results[:limit]
-
-        semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-        tasks = []
-        for href, card_promo, _ in hrefs_with_cardpromo:
-            if time.monotonic() > deadline:
-                break
-            tasks.append(asyncio.create_task(fetch_pdp_with_semaphore(semaphore, ctx, href, card_promo)))
-
-        # Consumimos a medida que terminan y paramos al llegar al límite o al deadline
-        for coro in asyncio.as_completed(tasks, timeout=max(0.1, deadline - time.monotonic())):
+    # Precio: puede venir como número o string con "ARS ..."
+    price = raw.get("price")
+    if isinstance(price, (int, float)):
+        price = f"ARS {price:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    elif isinstance(price, str) and not price.startswith("ARS"):
+        # intenta normalizar
+        num = re.findall(r"\d+[.,]?\d*", price)
+        if num:
+            n = num[0].replace(".", "").replace(",", ".")
             try:
-                pdp = await coro
+                price = f"ARS {float(n):,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+            except Exception:
+                pass
+
+    image = raw.get("image") or raw.get("image_url") or raw.get("thumbnail")
+    if image and image.startswith("//"):
+        image = "https:" + image
+    if image and image.startswith("/"):
+        image = COTO_STATIC_HOST + image
+
+    barcode = raw.get("barcode") or raw.get("ean") or raw.get("gtin")
+    promo = raw.get("promotion") or raw.get("promo") or raw.get("badges") or raw.get("offer")
+    if isinstance(promo, (list, dict)):
+        promo = json.dumps(promo, ensure_ascii=False)
+    promo = PROMO_NORMALIZER(promo) if promo else None
+
+    return CotoItem(
+        title=title.strip(),
+        price=price,
+        url=url,
+        image_url=image,
+        barcode=barcode,
+        promotion=promo,
+    )
+
+def _search_json_to_items(data: Any) -> List[CotoItem]:
+    items: List[CotoItem] = []
+    if not data:
+        return items
+
+    # Intenta paths comunes
+    candidates = []
+    if isinstance(data, dict):
+        for key in ("results", "items", "products", "hits"):
+            if key in data and isinstance(data[key], list):
+                candidates = data[key]
+                break
+        if not candidates:
+            # a veces el JSON viene bajo data.data.xxx
+            inner = data.get("data") or {}
+            for key in ("results", "items", "products", "hits"):
+                if key in inner and isinstance(inner[key], list):
+                    candidates = inner[key]
+                    break
+    elif isinstance(data, list):
+        candidates = data
+
+    for obj in candidates:
+        itm = _to_search_item(obj or {})
+        if itm:
+            items.append(itm)
+            if len(items) >= TOP_N:
+                break
+    return items
+
+def _extract_ldjson_items(html: str) -> List[CotoItem]:
+    items: List[CotoItem] = []
+    for m in re.finditer(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.S|re.I):
+        try:
+            blob = json.loads(m.group(1))
+        except Exception:
+            continue
+        if isinstance(blob, dict) and blob.get("@type") in ("Product", "ItemList"):
+            if blob.get("@type") == "Product":
+                itm = _to_search_item(blob)
+                if itm:
+                    items.append(itm)
+            elif blob.get("@type") == "ItemList":
+                for el in blob.get("itemListElement") or []:
+                    if isinstance(el, dict):
+                        itm = _to_search_item(el.get("item") or el)
+                        if itm:
+                            items.append(itm)
+        if len(items) >= TOP_N:
+            break
+    return items[:TOP_N]
+
+# ---------------- Core search ----------------
+async def _search_fast_json(playwright, q: str) -> List[CotoItem]:
+    """
+    Intenta pegarle al endpoint JSON/XHR que usa Coto para la búsqueda.
+    Ajusta SEARCH_ENDPOINT si cambia.
+    """
+    SEARCH_ENDPOINTS = [
+        # Coloca aquí el endpoint real que veas en Network (XHR/fetch) al buscar en Coto:
+        # Ejemplos (PUEDEN VARIAR):
+        # "/api/search?query={q}&store={sucursal}&page=1&size=24"
+        # "/api/catalog/search?q={q}&branchId={sucursal}&from=0&size=24"
+        f"{COTO_BASE}/api/search?query={{q}}&store={COTO_SUCURSAL_ID}&page=1&size=24",
+        f"{COTO_BASE}/api/catalog/search?q={{q}}&branchId={COTO_SUCURSAL_ID}&from=0&size=24",
+    ]
+
+    async with playwright.request.new_context(
+        base_url=COTO_BASE,
+        extra_http_headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"),
+            "Accept": "application/json, text/plain, */*",
+        },
+        timeout=8_000,  # ms por request
+    ) as req:
+        last_err = None
+        for raw in SEARCH_ENDPOINTS:
+            url = raw.format(q=quote_plus(q))
+            for attempt in range(3):
+                try:
+                    resp = await req.get(url)
+                    status = resp.status
+                    if status == 200:
+                        data = await resp.json()
+                        items = _search_json_to_items(data)
+                        if items:
+                            # filtro semántico rápido
+                            items = [i for i in items if _title_seems_related(i.title, q)]
+                            return items[:TOP_N]
+                    elif status in (429, 503):
+                        await asyncio.sleep(0.35 * (attempt + 1))
+                        continue
+                    else:
+                        last_err = f"HTTP {status} {url}"
+                        break
+                except Exception as e:
+                    last_err = repr(e)
+                    await asyncio.sleep(0.2 * (attempt + 1))
+        if last_err:
+            raise RuntimeError(f"search_fast_json failed: {last_err}")
+    return []
+
+async def _search_fallback_html(playwright, q: str) -> List[CotoItem]:
+    """
+    Fallback rápido: descarga HTML de resultados y lee JSON-LD.
+    """
+    paths = [
+        f"/s?q={quote_plus(q)}",
+        f"/busqueda?q={quote_plus(q)}",
+        f"/buscar?q={quote_plus(q)}",
+    ]
+    async with playwright.request.new_context(
+        base_url=COTO_BASE,
+        extra_http_headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+        timeout=7_000,
+    ) as req:
+        for path in paths:
+            try:
+                resp = await req.get(path)
+                if resp.status != 200:
+                    continue
+                html = await resp.text()
+                items = _extract_ldjson_items(html)
+                if items:
+                    items = [i for i in items if _title_seems_related(i.title, q)]
+                    return items[:TOP_N]
             except Exception:
                 continue
-            if not pdp or not pdp.get("title"):
-                continue
-            u = pdp.get("url")
-            if not u or u in seen_urls:
-                continue
-            seen_urls.add(u)
-            results.append(pdp)
-            if len(results) >= limit or time.monotonic() > deadline:
-                break
-
-        # Cancelar tareas pendientes si ya tenemos suficiente
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-
-        return results[:limit]
-    except Exception as e:
-        print(f"[LOG] Browser search error: {e}")
-        return []
-    finally:
-        await page.close()
-
-async def coto_search_by_barcode(ctx, ean: str, limit: int = TOP_N) -> List[Dict]:
-    prelim = await coto_search_top_n(ctx, ean, limit=limit*4)
-    out = []
-    for item in prelim:
-        bc = item.get("barcode")
-        if bc and bc == ean:
-            out.append(item)
-        if len(out) == limit:
-            break
-    return out or prelim[:limit]
-
-# ===================== API pública del scraper =====================
-
-async def search(ctx, q: Optional[str] = None, barcode: Optional[str] = None, limit: int = TOP_N) -> List[Dict]:
-    ean = normalize_barcode(barcode or (q or ""))
-    if ean and (not q or q.strip() == ean):
-        return await coto_search_by_barcode(ctx, ean, limit=limit)
-    if q and q.strip():
-        return await coto_search_top_n(ctx, q.strip(), limit=limit)
     return []
+
+# ===================== Entry point =====================
+async def search_coto(q: str, limit: int = TOP_N) -> List[Dict[str, Any]]:
+    """
+    Retorna: List[ { title, price (string "ARS ..."), url, image_url, barcode, promotion|null } ]
+    Hard cutoff 11.5s para evitar exceder los 15s del orquestador.
+    """
+    async def _run(playwright):
+        try:
+            items = await _search_fast_json(playwright, q)
+            if not items:
+                items = await _search_fallback_html(playwright, q)
+        except Exception:
+            items = await _search_fallback_html(playwright, q)
+
+        out = []
+        for it in items[:limit]:
+            out.append({
+                "title": it.title,
+                "price": it.price,
+                "url": it.url,
+                "image_url": it.image_url,
+                "barcode": it.barcode,
+                "promotion": it.promotion,
+            })
+        return out
+
+    # Ejecuta con hard timeout
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as pw:
+            return await asyncio.wait_for(_run(pw), timeout=HARD_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        # salimos con vacío antes de que el agregador nos corte
+        return []
