@@ -140,30 +140,24 @@ def _extract_ldjson_items(html: str) -> List[CotoItem]:
             break
     return items[:TOP_N]
 
-# ---------------- Core search ----------------
+
 async def _search_fast_json(playwright, q: str) -> List[CotoItem]:
-    """
-    Intenta pegarle al endpoint JSON/XHR que usa Coto para la búsqueda.
-    Ajusta SEARCH_ENDPOINT si cambia.
-    """
     SEARCH_ENDPOINTS = [
-        # Coloca aquí el endpoint real que veas en Network (XHR/fetch) al buscar en Coto:
-        # Ejemplos (PUEDEN VARIAR):
-        # "/api/search?query={q}&store={sucursal}&page=1&size=24"
-        # "/api/catalog/search?q={q}&branchId={sucursal}&from=0&size=24"
         f"{COTO_BASE}/api/search?query={{q}}&store={COTO_SUCURSAL_ID}&page=1&size=24",
         f"{COTO_BASE}/api/catalog/search?q={{q}}&branchId={COTO_SUCURSAL_ID}&from=0&size=24",
     ]
 
-    async with playwright.request.new_context(
+    # ✅ crear el contexto con await
+    req_ctx = await playwright.request.new_context(
         base_url=COTO_BASE,
         extra_http_headers={
             "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"),
             "Accept": "application/json, text/plain, */*",
         },
-        timeout=8_000,  # ms por request
-    ) as req:
+        timeout=8_000,
+    )
+    async with req_ctx as req:
         last_err = None
         for raw in SEARCH_ENDPOINTS:
             url = raw.format(q=quote_plus(q))
@@ -175,7 +169,6 @@ async def _search_fast_json(playwright, q: str) -> List[CotoItem]:
                         data = await resp.json()
                         items = _search_json_to_items(data)
                         if items:
-                            # filtro semántico rápido
                             items = [i for i in items if _title_seems_related(i.title, q)]
                             return items[:TOP_N]
                     elif status in (429, 503):
@@ -192,15 +185,13 @@ async def _search_fast_json(playwright, q: str) -> List[CotoItem]:
     return []
 
 async def _search_fallback_html(playwright, q: str) -> List[CotoItem]:
-    """
-    Fallback rápido: descarga HTML de resultados y lee JSON-LD.
-    """
     paths = [
         f"/s?q={quote_plus(q)}",
         f"/busqueda?q={quote_plus(q)}",
         f"/buscar?q={quote_plus(q)}",
     ]
-    async with playwright.request.new_context(
+
+    req_ctx = await playwright.request.new_context(
         base_url=COTO_BASE,
         extra_http_headers={
             "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -208,7 +199,8 @@ async def _search_fallback_html(playwright, q: str) -> List[CotoItem]:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
         timeout=7_000,
-    ) as req:
+    )
+    async with req_ctx as req:
         for path in paths:
             try:
                 resp = await req.get(path)
@@ -222,6 +214,7 @@ async def _search_fallback_html(playwright, q: str) -> List[CotoItem]:
             except Exception:
                 continue
     return []
+
 
 # ===================== Entry point =====================
 async def search_coto(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = TOP_N) -> List[Dict[str, Any]]:
