@@ -11,10 +11,10 @@ import unicodedata
 # ===================== Config =====================
 COTO_BASE = "https://www.cotodigital.com.ar"
 REQUEST_TIMEOUT = 8.0      # timeout por request individual
-HARD_TIMEOUT_SEC = 11.5    # hard cutoff (útil si te envuelven con el agregador)
+HARD_TIMEOUT_SEC = 11.5    # hard cutoff para no colgar el agregador
 TOP_N = 3
 
-# PROMO_NORMALIZER opcional; si no está en tu repo, queda no-op
+# PROMO_NORMALIZER (si existe en tu repo); si no, no-op
 try:
     from scrapers._utils_promos import PROMO_NORMALIZER  # type: ignore
 except Exception:
@@ -25,7 +25,6 @@ except Exception:
 def _to_float(s: Optional[str]) -> Optional[float]:
     if not s:
         return None
-    # Formatos: "1234,56" / "1.234,56" / "1234.56"
     s2 = s.strip().replace(".", "").replace(",", ".")
     try:
         return float(s2)
@@ -35,7 +34,6 @@ def _to_float(s: Optional[str]) -> Optional[float]:
 def _ars(amount: Optional[float]) -> Optional[str]:
     if amount is None:
         return None
-    # "ARS 1.234,56"
     val = f"{amount:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
     return f"ARS {val}"
 
@@ -57,8 +55,35 @@ def _title_seems_related(title: str, q: Optional[str]) -> bool:
     return True
 
 def _normalize_link(record_state: str) -> str:
-    # Go: strings.Replace(RecordState, "?format=json", "", -1)
-    return (record_state or "").replace("?format=json", "")
+    # Limpia el sufijo JSON y vuelve absoluto
+    url = (record_state or "").replace("?format=json", "")
+    if url.startswith("/"):
+        url = COTO_BASE + url
+    return url
+
+def _fix_discount_scale(desc: Optional[float], reference: Optional[float]) -> Optional[float]:
+    """
+    Si el descuento viene 'escalado' (p.ej. 3.100.000.000 en lugar de 3100),
+    dividimos por 10 hasta que sea razonable respecto al precio base.
+    Criterio: 0 < desc_norm <= reference * 1.05
+    """
+    if not desc or desc <= 0 or not reference or reference <= 0:
+        return None
+    v = float(desc)
+    for _ in range(6):  # intenta hasta /10^6
+        if 0 < v <= reference * 1.05:
+            return v
+        v /= 10.0
+    return None
+
+def _safe_get(d: Dict[str, Any], path: List[Any], default=None):
+    cur = d
+    try:
+        for p in path:
+            cur = cur[p]
+        return cur
+    except Exception:
+        return default
 
 # ===================== Fetch =====================
 async def _fetch_coto_json(query: str) -> Dict[str, Any]:
@@ -75,13 +100,13 @@ async def _fetch_coto_json(query: str) -> Dict[str, Any]:
         r.raise_for_status()
         return r.json()
 
-# ===================== Normalizer & Extractor (paridad con Go) =====================
+# ===================== Normalizer (paridad con Go) =====================
 def _normalize_response_structure(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Replica el Normalizer del Go:
-    - Navega: contents[0].Main[?].contents[0].records -> CotoResponseProduct
-    - Mantiene SOLO los que tienen product.dtoDescuentos (como en Go)
-    - Adjunta el JSON parseado de dtoDescuentos como _cotoProductDiscounts
+    - Recorre contents[*].Main[*].contents[*].records[*]
+    - Conserva solo los que traen product.dtoDescuentos
+    - Adjunta el JSON parseado como _cotoProductDiscounts
     """
     normalized: List[Dict[str, Any]] = []
     contents = data.get("contents") or []
@@ -95,8 +120,7 @@ def _normalize_response_structure(data: Dict[str, Any]) -> List[Dict[str, Any]]:
             for block in blocks:
                 records = block.get("records") or []
                 for raw in records:
-                    prod_discounts = (((raw.get("records") or [{}])[0].get("attributes") or {})
-                                      .get("product.dtoDescuentos")) or []
+                    prod_discounts = _safe_get(raw, ["records", 0, "attributes", "product.dtoDescuentos"], [])
                     if not prod_discounts or not isinstance(prod_discounts, list):
                         continue
                     try:
@@ -110,12 +134,8 @@ def _normalize_response_structure(data: Dict[str, Any]) -> List[Dict[str, Any]]:
                     normalized.append(enriched)
     return normalized
 
+# ===================== Extractor (a SearchItem-like) =====================
 def _extract_item(raw: Dict[str, Any], q: Optional[str]) -> Optional[Dict[str, Optional[str]]]:
-    """
-    Devuelve SearchItem dict:
-      { title, price "ARS ...", url, image_url, barcode(None), promotion(None|normalizada) }
-    """
-    # Encabezado
     attrs = raw.get("attributes") or {}
     display = (attrs.get("product.displayName") or [])
     repo_id = (attrs.get("product.repositoryId") or [])
@@ -123,12 +143,12 @@ def _extract_item(raw: Dict[str, Any], q: Optional[str]) -> Optional[Dict[str, O
     if not title or not _title_seems_related(title, q):
         return None
 
-    # Link
+    # Link limpio + absoluto
     record_state = (raw.get("detailsAction") or {}).get("recordState") or ""
     url = _normalize_link(record_state)
 
     # Detalles del primer record
-    r0_attrs = (((raw.get("records") or [{}])[0]).get("attributes") or {})
+    r0_attrs = _safe_get(raw, ["records", 0, "attributes"], {}) or {}
     img_arr = r0_attrs.get("product.mediumImage.url") or []
     qty_arr = r0_attrs.get("sku.quantity") or []
     active_price_arr = r0_attrs.get("sku.activePrice") or []
@@ -140,33 +160,40 @@ def _extract_item(raw: Dict[str, Any], q: Optional[str]) -> Optional[Dict[str, O
 
     list_price = _to_float(ref_price_arr[0]) if ref_price_arr else None
     active_price = _to_float(active_price_arr[0]) if active_price_arr else None
-    price = active_price if active_price is not None else (list_price if list_price is not None else None)
+    base_price = active_price if active_price is not None else (list_price if list_price is not None else None)
 
-    # dtoDescuentos (JSON adjunto)
+    # dtoDescuentos (JSON ya parseado en el normalizador)
     discounts = raw.get("_cotoProductDiscounts") or []
     promotion_text: Optional[str] = None
+    final_price = base_price
+
     if isinstance(discounts, list) and discounts:
         first = discounts[0] or {}
         desc_val = first.get("precioDescuento")
         desc_f = _to_float(str(desc_val)) if desc_val is not None else None
-        if desc_f and desc_f > 0:
-            price = desc_f
-        # si querés exponer algo en promotion:
-        # promotion_text = PROMO_NORMALIZER(json.dumps(first, ensure_ascii=False))
+        desc_norm = _fix_discount_scale(desc_f, base_price)
+        if desc_norm is not None and (final_price is None or desc_norm <= final_price):
+            final_price = desc_norm
+            ref = base_price or 0.0
+            if ref > 0:
+                pct = max(0.0, 100.0 * (1.0 - (final_price / ref)))
+                promotion_text = f"{pct:.0f}% OFF"
 
     image_url = img_arr[0] if img_arr else None
-    # Ajustes URL relativas (poco frecuente en este endpoint)
     if image_url and isinstance(image_url, str) and image_url.startswith("//"):
         image_url = "https:" + image_url
-    if url and url.startswith("/"):
-        url = COTO_BASE + url
+
+    # Fallbacks pedidos:
+    # - barcode estable (NO EAN): repositoryId; si preferís un hash del título, podés cambiarlo.
+    barcode = repo_id[0] if repo_id else None
+    # import hashlib; barcode = hashlib.md5(title.encode("utf-8")).hexdigest()[:13]  # alternativa
 
     return {
         "title": title,
-        "price": _ars(price),
+        "price": _ars(final_price),
         "url": url or None,
         "image_url": image_url,
-        "barcode": None,         # el endpoint no expone EAN; si querés podemos setear repo_id[0] como fallback
+        "barcode": barcode,
         "promotion": PROMO_NORMALIZER(promotion_text) if promotion_text else None,
     }
 
@@ -185,7 +212,8 @@ async def search_coto(q: Optional[str] = None, barcode: Optional[str] = None, li
 
     async def _run():
         data = await _fetch_coto_json(quote(query, safe=""))
-        # chequeo de errores tipo GraphQL (por si aparece)
+
+        # si la API devolviera errors (GraphQL-like), devolvemos vacío
         if isinstance(data, dict) and data.get("errors"):
             return []
 
