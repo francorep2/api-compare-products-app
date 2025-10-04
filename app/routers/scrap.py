@@ -1,12 +1,14 @@
+import asyncio
+from http.client import HTTPException
 from typing import List, Optional
 from fastapi import Query
 from app.models.search_item import SearchItem, SearchResponse
 from app.services.coto import search_coto
-from app.services.dia import search  
-from app.services.carrefour import search
-from app.services.jumbo import search  
+from app.services.dia import search as search_dia
+from app.services.carrefour import search as search_carrefour
+from app.services.jumbo import search as search_jumbo
 from fastapi import APIRouter, Query
-from app.services.all import search_all
+from app.services.all import safe_call, search_all
 from app.dependencies.auth import get_current_user, User
 from fastapi import APIRouter, Depends, Query
 from typing import List, Optional
@@ -81,15 +83,30 @@ async def search_jumbo_endpoint(
     items = await search(q=q, barcode=barcode, limit=limit)
     return {"results": items}
 
-
 @router.get("/all")
-async def search_all_endpoint(
-    q: Optional[str] = Query(None),
-    barcode: Optional[str] = Query(None),
-    limit: int = Query(3, ge=1, le=10),
-    enabled: Optional[List[str]] = Query(None, description="Filtrar tiendas: carrefour,coto,jumbo,dia"),
+async def search_all(
+    q: Optional[str] = None,
+    barcode: Optional[str] = None,
+    limit: int = 3,
+    enabled: List[str] = Query(default=["carrefour", "coto", "dia", "jumbo"])
 ):
-    """
-    Agregador: busca por nombre o barcode en múltiples tiendas.
-    """
-    return await search_all(q=q, barcode=barcode, limit=limit, enabled=enabled)
+    if not q and not barcode:
+        raise HTTPException(status_code=400, detail="Debes enviar 'q' o 'barcode'.")
+
+    tasks = [
+        safe_call(search_coto(q=q, barcode=barcode, limit=limit)) if "coto" in enabled else asyncio.sleep(0, result=[]),
+        safe_call(search_carrefour(q=q, barcode=barcode, limit=limit)) if "carrefour" in enabled else asyncio.sleep(0, result=[]),
+        safe_call(search_dia(q=q, barcode=barcode, limit=limit)) if "dia" in enabled else asyncio.sleep(0, result=[]),
+        safe_call(search_jumbo(q=q, barcode=barcode, limit=limit)) if "jumbo" in enabled else asyncio.sleep(0, result=[]),
+    ]
+
+    coto, carrefour, dia, jumbo = await asyncio.gather(*tasks)
+
+    return {
+        "results": {
+            "coto": coto,
+            "carrefour": carrefour,
+            "dia": dia,
+            "jumbo": jumbo,
+        }
+    }
