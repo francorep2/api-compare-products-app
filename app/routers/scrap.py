@@ -6,7 +6,7 @@ from app.services.dia import search
 from app.services.carrefour import search
 from app.services.jumbo import search  
 from fastapi import APIRouter, Query
-from app.services.all import search_all_grouped
+from app.services.all import search_all
 from app.dependencies.auth import get_current_user, User
 from fastapi import APIRouter, Depends, Query
 from typing import List, Optional
@@ -15,7 +15,6 @@ from app.db import get_db
 from typing import Optional, Dict, List, Any
 from app.dependencies.auth import get_current_user, User
 from app.auth.models import ScrapePrefs
-from app.services.all import search_all_grouped
 
 router = APIRouter(prefix="/search", tags=["search"],dependencies=[Depends(get_current_user)],)
 
@@ -93,4 +92,4 @@ async def search_all_endpoint(
     """
     Agregador: busca por nombre o barcode en múltiples tiendas.
     """
-    return await search_all_grouped(q=q, barcode=barcode, limit=limit, enabled=enabled)
+    return await search_all(q=q, barcode=barcode, limit=limit, enabled=enabled)
