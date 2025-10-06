@@ -7,8 +7,8 @@ from app.core.browser_async import browser_manager_async
 from app.models.search_item import SearchItem
 from app.services.coto import search_coto
 from app.services.jumbo import search as search_jumbo
-from app.services.carrefour import search as search_carrefour
-from app.services.dia import search as search_dia
+from app.services.carrefour import search_carrefour 
+from app.services.dia import search_dia
 from scrapers.barcode_resolver import resolve_name_carrefour, resolve_name_dia, resolve_name_jumbo
 from app.dependencies.auth import get_current_user, User
 
