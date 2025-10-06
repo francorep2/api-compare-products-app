@@ -4,8 +4,8 @@ from typing import List, Optional
 from fastapi import Query
 from app.models.search_item import SearchItem, SearchResponse
 from app.services.coto import search_coto
-from app.services.dia import search as search_dia
-from app.services.carrefour import search as search_carrefour
+from app.services.dia import search_dia
+from app.services.carrefour import search_carrefour
 from app.services.jumbo import search as search_jumbo
 from fastapi import APIRouter, Query
 from app.services.all import safe_call, search_all
