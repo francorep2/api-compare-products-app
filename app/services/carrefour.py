@@ -1,16 +1,20 @@
-# app/services/carrefour_async.py
-from typing import List, Dict, Optional
-from scrapers.carrefour_scraper_async import search_carrefour as _search_carrefour
 
-async def search(
-    q: Optional[str] = None,
-    barcode: Optional[str] = None,
-    limit: int = 3,
-    include_promotions: bool = False,  # rápido por defecto
-) -> List[Dict]:
-    return await _search_carrefour(
-        q=q,
-        barcode=barcode,
-        limit=limit,
-        include_promotions=include_promotions,
-    )
+from ast import Dict
+from app.core.browser_async import browser_manager_async
+from scrapers.carrefour_scraper_async import search_carrefour as carrefour_search
+
+from typing import List, Optional
+
+
+DEFAULT_CTX = {
+    "locale": "es-AR",
+    "user_agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+    ),
+    "viewport": {"width": 1366, "height": 800},
+}
+
+async def search_carrefour(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
+    async with browser_manager_async.new_context(**DEFAULT_CTX) as ctx:
+        return await carrefour_search(ctx, q=q, barcode=barcode, limit=limit)
