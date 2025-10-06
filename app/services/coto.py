@@ -57,13 +57,6 @@ DEFAULT_CTX = {
 }
 
 
-# --- FUNCIÓN CORREGIDA ---
-async def search_coto(ctx, q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
-    """
-    Esta función ahora RECIBE el contexto de Playwright ('ctx') en lugar de crearlo.
-    Simplemente pasa los argumentos a la función de scraping real.
-    """
-    # Se eliminó el bloque 'async with browser_manager_async.new_context...'
-    # porque el contexto ahora viene desde afuera (desde list_comparator).
-    print(f"[#EAN TASK 2 COTO] -------------> q={q}, barcode={barcode}")
-    return await coto_search(ctx=ctx, q=q, barcode=barcode, limit=limit)
+async def search_coto(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
+    async with browser_manager_async.new_context(**DEFAULT_CTX) as ctx:
+        return await coto_search(ctx=ctx, q=q, barcode=barcode, limit=limit)
