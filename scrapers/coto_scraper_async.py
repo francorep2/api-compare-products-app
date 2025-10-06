@@ -1,7 +1,7 @@
 from typing import List, Dict, Optional
 import json, urllib.parse, re, time, datetime, os, asyncio, unicodedata
 
-import httpx  # <-- para JSON rápido
+import httpx
 from scrapers._utils_promos import PROMO_NORMALIZER
 
 # ===================== Config =====================
@@ -11,8 +11,8 @@ COTO_BASE = "https://www.cotodigital.com.ar"
 COTO_STATIC_HOST = "https://static.cotodigital3.com.ar"
 COTO_SUCURSAL_ID = 200
 CONCURRENCY_LIMIT = 4
-REQUEST_TIMEOUT = 6.0      # JSON endpoint
-HARD_TIME_BUDGET = 11.0    # presupuesto total aprox para no colgar aguas arriba
+REQUEST_TIMEOUT = 6.0
+HARD_TIME_BUDGET = 11.0
 
 # ===================== Texto / matching =====================
 
@@ -28,7 +28,6 @@ def _title_seems_related(title: str, q: str) -> bool:
         return True
     t = _norm_text(title)
     s = _norm_text(q)
-    # heurística suave: todas las palabras del query deben aparecer
     for w in s.split():
         if w and w not in t:
             return False
@@ -114,10 +113,6 @@ def _normalize_link(record_state: str) -> str:
     return url
 
 def _fix_discount_scale(desc: Optional[float], reference: Optional[float]) -> Optional[float]:
-    """
-    Si precioDescuento viene 'inflado' (ej: 3.100.000.000 en lugar de 3100),
-    dividimos por 10 hasta que sea razonable: 0 < desc <= reference * 1.05
-    """
     if not desc or desc <= 0 or not reference or reference <= 0:
         return None
     v = float(desc)
@@ -414,7 +409,7 @@ async def extract_barcode_from_datalayer_or_html(page) -> Optional[str]:
     except: pass
     return None
 
-# ===================== JSON FAST SEARCH (como el Go) =====================
+# ===================== JSON FAST SEARCH (Mejorado) =====================
 
 async def _fetch_coto_json(query: str) -> Optional[dict]:
     url = f"{COTO_BASE}/sitios/cdigi/categoria"
@@ -431,79 +426,60 @@ async def _fetch_coto_json(query: str) -> Optional[dict]:
             r.raise_for_status()
             return r.json()
     except Exception as e:
-        print("[coto][json] fetch error:", e)
+        print(f"[coto][json] fetch error: {e}")
         return None
 
 def _extract_from_json(data: dict, q: str, limit: int) -> List[Dict]:
     out: List[Dict] = []
-    contents = (data or {}).get("contents") or []
-    if not contents:
-        return out
-    # recorrer todo Main/contents/records
-    for section in contents:
-        main_list = section.get("Main") or []
-        for main in main_list:
-            blocks = main.get("contents") or []
-            for block in blocks:
-                records = block.get("records") or []
-                for raw in records:
-                    attrs_header = (raw.get("attributes") or {})
-                    disp = (attrs_header.get("product.displayName") or [])
-                    repo = (attrs_header.get("product.repositoryId") or [])
-                    title = (disp[0] if disp else "") or ""
-                    if not title or not _title_seems_related(title, q):
-                        continue
+    
+    stack = [data]
+    products_raw = []
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            if "productList" in current and isinstance(current["productList"], list):
+                products_raw = current["productList"]
+                break
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
 
-                    record_state = (raw.get("detailsAction") or {}).get("recordState") or ""
-                    url = _normalize_link(record_state)
+    if not products_raw:
+        return []
 
-                    r0_attrs = (((raw.get("records") or [{}])[0]).get("attributes") or {})
-                    qty_arr = r0_attrs.get("sku.quantity") or []
-                    if qty_arr and str(qty_arr[0]).strip() == "0":
-                        continue
+    for prod in products_raw:
+        if not isinstance(prod, dict): continue
 
-                    img_arr = r0_attrs.get("product.mediumImage.url") or []
-                    image_url = img_arr[0] if img_arr else None
-                    if image_url and isinstance(image_url, str) and image_url.startswith("//"):
-                        image_url = "https:" + image_url
+        name = prod.get("name")
+        if not name or not _title_seems_related(name, q):
+            continue
 
-                    active_price = _to_float((r0_attrs.get("sku.activePrice") or [None])[0])
-                    ref_price = _to_float((r0_attrs.get("sku.referencePrice") or [None])[0])
-                    base_price = active_price if active_price is not None else ref_price
+        link_data = prod.get("link", {})
+        href = link_data.get("path")
+        url = f"{COTO_BASE}{href}" if href else None
+        
+        price_data = prod.get("price", {})
+        final_price = price_data.get("finalPrice") or price_data.get("listPrice")
 
-                    discounts_raw = (r0_attrs.get("product.dtoDescuentos") or
-                                     ((raw.get("records") or [{}])[0].get("attributes") or {}).get("product.dtoDescuentos") or
-                                     (raw.get("records") or [{}])[0].get("product.dtoDescuentos") or [])
-                    # El Go exigía que exista dtoDescuentos; acá NO lo exigimos para no tirar todo a vacío
-                    promo = None
-                    final_price = base_price
-                    parsed = None
-                    if isinstance(discounts_raw, list) and discounts_raw:
-                        try:
-                            parsed = json.loads(discounts_raw[0])
-                        except Exception:
-                            parsed = None
-                    if isinstance(parsed, list) and parsed:
-                        first = parsed[0] or {}
-                        desc_val = first.get("precioDescuento")
-                        desc_f = _to_float(str(desc_val)) if desc_val is not None else None
-                        desc_norm = _fix_discount_scale(desc_f, base_price)
-                        if desc_norm is not None and (final_price is None or desc_norm <= final_price):
-                            final_price = desc_norm
-                            if base_price:
-                                pct = max(0.0, 100.0 * (1.0 - (final_price / base_price)))
-                                promo = f"{pct:.0f}% DTO"
+        ean = prod.get("ean")
 
-                    out.append({
-                        "title": title,
-                        "price": _ars(final_price),
-                        "url": url or None,
-                        "image_url": image_url,
-                        "barcode": (repo[0] if repo else None),  # estable (no es EAN)
-                        "promotion": promo,
-                    })
-                    if len(out) >= limit:
-                        return out
+        images = prod.get("images", [])
+        image_url = images[0].get("path") if images else None
+        if image_url and image_url.startswith("//"):
+            image_url = "https:" + image_url
+
+        out.append({
+            "title": name,
+            "price": f"ARS {final_price:.2f}" if final_price is not None else None,
+            "url": url,
+            "image_url": image_url,
+            "barcode": ean,
+            "promotion": None,
+        })
+
+        if len(out) >= limit:
+            break
+            
     return out
 
 async def _search_json_top_n(q: str, limit: int) -> List[Dict]:
@@ -608,7 +584,6 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
         print(f"[LOG] Coto Browser GET {search_url}")
         await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
 
-        # esperar anchors del grid si existen
         try:
             await page.wait_for_selector("a[href*='/sitios/cdigi/productos/']", timeout=5000)
         except Exception:
@@ -631,7 +606,6 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
                     card_promo = await extract_promotion_from_card(a)
                     hrefs_with_cardpromo.append((href, card_promo))
         else:
-            # fallback: parsear HTML por regex de anchors
             html = await page.content()
             found = re.findall(r'href="([^"]+/sitios/cdigi/productos/[^"]+)"', html, flags=re.I)
             for h in found[:max(6, limit*3)]:
@@ -644,7 +618,6 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
         semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
         tasks = [fetch_pdp_with_semaphore(semaphore, ctx, href, card_promo) for href, card_promo in hrefs_with_cardpromo]
 
-        # cortar si nos quedamos sin presupuesto global
         remaining = max(1.0, HARD_TIME_BUDGET - (time.monotonic() - start))
         done, pending = await asyncio.wait(tasks, timeout=remaining, return_when=asyncio.FIRST_COMPLETED if limit == 1 else asyncio.ALL_COMPLETED)
         for p in pending:
@@ -670,7 +643,6 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
         await page.close()
 
 async def coto_search_by_barcode(ctx, ean: str, limit: int = TOP_N) -> List[Dict]:
-    # no hay EAN en JSON; usamos el EAN como query y devolvemos top
     prelim = await coto_search_top_n(ctx, ean, limit=limit*3)
     out = []
     for item in prelim:
@@ -685,8 +657,18 @@ async def coto_search_by_barcode(ctx, ean: str, limit: int = TOP_N) -> List[Dict
 
 async def search(ctx, q: Optional[str] = None, barcode: Optional[str] = None, limit: int = TOP_N) -> List[Dict]:
     ean = normalize_barcode(barcode or (q or ""))
+    
+    if q and q.strip():
+        try:
+            json_items = await _search_json_top_n(q.strip(), limit)
+            if json_items:
+                return json_items
+        except Exception as e:
+            print(f"[coto] Búsqueda por JSON falló: {e}, intentando con Playwright...")
+
     if ean and (not q or q.strip() == ean):
         return await coto_search_by_barcode(ctx, ean, limit=limit)
     if q and q.strip():
         return await coto_search_top_n(ctx, q.strip(), limit=limit)
+        
     return []
