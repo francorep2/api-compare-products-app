@@ -1,6 +1,7 @@
 # app/routers/shopping.py
 from dataclasses import Field
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.db import Base, get_db
 from app.schemas.shopping_list import (
@@ -14,8 +15,8 @@ from app.repos.shopping_list_repo import (
 )
 from app.dependencies.auth import get_current_user  
 
-class RenameIn(Base):
-    nombre: str 
+class RenameIn(BaseModel):
+    nombre: str
 
 
 router = APIRouter(prefix="/shopping", tags=["shopping"])
