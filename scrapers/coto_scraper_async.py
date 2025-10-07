@@ -159,21 +159,44 @@ def parse_jsonld_from_text(html: str) -> Optional[Dict]:
 SEARCH_URL_TMPL = (
     f"{COTO_BASE}/sitios/cdigi/categoria?_dyncharset=utf-8&Dy=1&Ntt={{q}}&idSucursal={COTO_SUCURSAL_ID}"
 )
-
-async def _configure_blocking(ctx):
+async def _configure_blocking(page):
     async def _route(route):
         r = route.request
         rtype = r.resource_type
         url = r.url
-        # corta todo lo pesado y trackers
         if rtype in {"image","stylesheet","font","media"}:
-            return await route.abort()
-        if any(k in url for k in ("googletagmanager","tagmanager","doubleclick","facebook","hotjar","analytics","sentry","clarity")):
-            return await route.abort()
-        return await route.continue_()
-    await ctx.route("**/*", _route)
-    await ctx.set_default_navigation_timeout(8000)
-    await ctx.set_default_timeout(8000)
+            await route.abort()
+            return
+        if any(k in url for k in (
+            "googletagmanager","tagmanager","doubleclick","facebook",
+            "hotjar","analytics","sentry","clarity"
+        )):
+            await route.abort()
+            return
+        await route.continue_()
+
+    # ✅ page.route es async → se espera
+    await page.route("**/*", _route)
+
+    # ❌ NO await (son setters sin await)
+    page.set_default_navigation_timeout(8000)
+    page.set_default_timeout(8000)
+
+
+async def _probe_pdp_jsonld_http(ctx, url: str, timeout_ms: int = 1000) -> Optional[Dict]:
+    """
+    ctx debe ser un BrowserContext (p.ej. page.context)
+    """
+    try:
+        # ✅ timeout EN MILISEGUNDOS (no dividir por 1000)
+        r = await ctx.request.get(url, timeout=timeout_ms)
+        if not r or r.status != 200:
+            return None
+        text = await r.text()
+        jl = parse_jsonld_from_text(text)
+        return jl
+    except:
+        return None
 
 async def _page_get_search(ctx, q: str):
     page = await ctx.new_page()

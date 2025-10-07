@@ -1,5 +1,5 @@
 from typing import List, Optional
-from fastapi import Query
+from fastapi import HTTPException, Query
 from app.models.search_item import SearchItem, SearchResponse
 from app.services.coto import search_coto
 from app.services.dia import search  
@@ -51,8 +51,11 @@ async def search_coto_endpoint(
     barcode: str | None = Query(None),
     limit: int = Query(3, ge=1, le=10),
 ):
-    items = await search_coto(q=q, barcode=barcode, limit=limit)
-    return {"results": items}
+    try:
+        items = await search_coto(q=q, barcode=barcode, limit=limit)
+        return {"items": items}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Coto scraper error: {type(e).__name__}")
 
 @router.get("/carrefour")
 async def search_carrefour_endpoint(
