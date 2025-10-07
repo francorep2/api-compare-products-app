@@ -1,7 +1,7 @@
 from typing import List, Optional
 from fastapi import Query
 from app.models.search_item import SearchItem, SearchResponse
-from app.services.coto import search_coto
+from app.services.coto import coto_search as search_coto
 from app.services.dia import search  
 from app.services.carrefour import search
 from app.services.jumbo import search  
