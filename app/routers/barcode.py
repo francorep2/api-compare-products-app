@@ -7,7 +7,7 @@ from fastapi import APIRouter, Query, HTTPException, Depends, Request
 from typing import Dict, List, Optional
 
 from app.models.search_item import SearchItem
-from app.services.coto import search_coto
+from app.services.coto import coto_search as search_coto
 from app.services.peer_name_resolver import resolve_product_name_from_peers
 from app.services.jumbo import search as search_jumbo
 from app.services.carrefour import search as search_carrefour
