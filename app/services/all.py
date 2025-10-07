@@ -2,11 +2,7 @@ from typing import Dict, List, Optional, Callable
 import asyncio
 import logging
 import inspect
-
-# Importa el manager del navegador
 from app.core.browser_async import browser_manager_async
-
-# Importa las funciones de búsqueda específicas
 from app.services.coto import coto_search as search_coto
 from app.services.carrefour import search as search_carrefour
 from app.services.dia import search as search_dia
