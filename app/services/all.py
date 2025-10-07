@@ -7,7 +7,7 @@ import inspect
 from app.core.browser_async import browser_manager_async
 
 # Importa las funciones de búsqueda específicas
-from app.services.coto import search as search_coto
+from app.services.coto import search_coto
 from app.services.carrefour import search as search_carrefour
 from app.services.dia import search as search_dia
 from app.services.jumbo import search as search_jumbo
