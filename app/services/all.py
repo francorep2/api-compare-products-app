@@ -1,71 +1,80 @@
-# app/services/all.py
 from typing import Dict, List, Optional, Callable
 import asyncio
 import logging
 import inspect
 
-from app.services.coto import search_coto
-from app.services.carrefour import search
-from app.services.dia import search
-from app.services.jumbo import search
+# Importa el manager del navegador
+from app.core.browser_async import browser_manager_async
+
+# Importa las funciones de búsqueda específicas
+from app.services.coto import search as search_coto
+from app.services.carrefour import search as search_carrefour
+from app.services.dia import search as search_dia
+from app.services.jumbo import search as search_jumbo
 
 log = logging.getLogger(__name__)
 
-HEAVY_PROVIDERS = {"carrefour", "dia"}
+# Define qué scrapers necesitan un navegador
+BROWSER_PROVIDERS = {"coto"}
 
-PROVIDERS: Dict[str, Callable[..., List[Dict]]] = {
-    "carrefour": search,
+# Mapeo de nombres a funciones
+PROVIDERS: Dict[str, Callable] = {
+    "carrefour": search_carrefour,
     "coto": search_coto,
-    "jumbo": search,
-    "dia": search,
+    "jumbo": search_jumbo,
+    "dia": search_dia,
 }
 
-PER_PROVIDER_TIMEOUT = 15   # segundos máx por tienda
-OVERALL_TIMEOUT = 40        # máx para toda la búsqueda
+PER_PROVIDER_TIMEOUT = 25  # Aumentado para dar margen a Playwright
+OVERALL_TIMEOUT = 40
 
+async def _invoke_provider(
+    name: str,
+    fn: Callable,
+    q: Optional[str],
+    barcode: Optional[str],
+    limit: int
+) -> List[Dict]:
+    """Llama al scraper, pasándole el contexto del navegador si lo necesita."""
+    
+    # Preparamos los argumentos base
+    kwargs = {"q": q, "barcode": barcode, "limit": limit}
 
-async def _invoke_provider(fn: Callable[..., List[Dict]],
-                           q: Optional[str],
-                           barcode: Optional[str],
-                           limit: int):
-    """Llama al provider, async o sync."""
-    if inspect.iscoroutinefunction(fn):
-        return await fn(q=q, barcode=barcode, limit=limit)
+    if name in BROWSER_PROVIDERS:
+        # Si es un scraper de navegador, creamos un contexto y lo pasamos
+        async with browser_manager_async.new_context() as ctx:
+            return await fn(ctx=ctx, **kwargs)
     else:
-        return await asyncio.to_thread(fn, q, barcode, limit)
+        # Si es un scraper de API, lo llamamos directamente
+        if inspect.iscoroutinefunction(fn):
+            return await fn(**kwargs)
+        else:
+            return await asyncio.to_thread(fn, **kwargs)
 
-
-async def _run_provider(name: str,
-                        fn: Callable[..., List[Dict]],
-                        q: Optional[str],
-                        barcode: Optional[str],
-                        limit: int,
-                        sem: asyncio.Semaphore) -> List[Dict]:
-    """Ejecuta un provider con semáforo, timeout y manejo de errores."""
+async def _run_provider(
+    name: str,
+    fn: Callable,
+    q: Optional[str],
+    barcode: Optional[str],
+    limit: int
+) -> List[Dict]:
+    """Ejecuta un scraper con timeout y manejo de errores."""
     try:
-        async def _job():
-            if name in HEAVY_PROVIDERS:
-                async with sem:
-                    return await _invoke_provider(fn, q, barcode, limit)
-            return await _invoke_provider(fn, q, barcode, limit)
-
-        res = await asyncio.wait_for(_job(), timeout=PER_PROVIDER_TIMEOUT)
-
-        if res is None:
-            return []
-        if inspect.isawaitable(res):
-            res = await res
+        # El timeout ahora envuelve directamente la invocación
+        res = await asyncio.wait_for(
+            _invoke_provider(name, fn, q, barcode, limit),
+            timeout=PER_PROVIDER_TIMEOUT
+        )
         if not isinstance(res, list):
-            log.warning(f"[all] Provider {name} devolvió {type(res)}; se esperaba list.")
+            log.warning(f"[{name}] El scraper devolvió un tipo inesperado: {type(res)}")
             return []
         return res
     except asyncio.TimeoutError:
-        log.warning(f"[all] Provider {name} excedió {PER_PROVIDER_TIMEOUT}s")
+        log.warning(f"[{name}] Timeout: excedió los {PER_PROVIDER_TIMEOUT}s")
         return []
     except Exception as e:
-        log.exception(f"[all] Provider {name} falló: {e}")
+        log.exception(f"[{name}] Falló con una excepción: {e}")
         return []
-
 
 async def search_all_grouped(
     q: Optional[str] = None,
@@ -73,44 +82,34 @@ async def search_all_grouped(
     limit: int = 3,
     enabled: Optional[List[str]] = None,
 ) -> Dict[str, object]:
-    """Agrega resultados por tienda. Corre todo en paralelo con control de tiempo."""
+    """Agrega resultados por tienda, corriendo todo en paralelo."""
     if not q and not barcode:
-        empty = {k: [] for k in PROVIDERS.keys()}
-        return {"results": empty, "count": 0, "enabled": list(PROVIDERS.keys())}
+        return {"results": {k: [] for k in PROVIDERS}, "count": 0, "enabled": list(PROVIDERS.keys())}
 
     enabled_set = set(enabled or PROVIDERS.keys())
-    active = {k: v for k, v in PROVIDERS.items() if k in enabled_set}
-
-    browser_semaphore = asyncio.Semaphore(1)
+    active_providers = {k: v for k, v in PROVIDERS.items() if k in enabled_set}
 
     tasks = [
-        asyncio.create_task(
-            _run_provider(name, fn, q, barcode, limit, browser_semaphore)
-        )
-        for name, fn in active.items()
+        asyncio.create_task(_run_provider(name, fn, q, barcode, limit))
+        for name, fn in active_providers.items()
     ]
 
     try:
-        results = await asyncio.wait_for(
-            asyncio.gather(*tasks, return_exceptions=False),
+        results_list = await asyncio.wait_for(
+            asyncio.gather(*tasks),
             timeout=OVERALL_TIMEOUT
         )
     except asyncio.TimeoutError:
         log.warning(f"[all] Timeout general de {OVERALL_TIMEOUT}s")
-        results = [[] for _ in active]
+        results_list = [[] for _ in active_providers]
 
-    results_per_store: Dict[str, List[Dict]] = {
-        name: (res or [])[:limit] for name, res in zip(active.keys(), results)
-    }
-
-    # asegurar claves vacías para deshabilitadas
-    for name in PROVIDERS.keys():
-        results_per_store.setdefault(name, [])
+    # Mapea los resultados de vuelta a cada tienda
+    results_per_store = dict(zip(active_providers.keys(), results_list))
 
     total_count = sum(len(v) for v in results_per_store.values())
 
     return {
         "results": results_per_store,
         "count": total_count,
-        "enabled": list(active.keys()),
+        "enabled": list(active_providers.keys()),
     }
