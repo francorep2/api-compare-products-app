@@ -24,3 +24,5 @@ gunicorn
 uvicorn[standard]
 httpx[http2]
 lxml
+bs4
+html5lib
