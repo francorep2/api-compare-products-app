@@ -1,53 +1,72 @@
 # app/services/all.py
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Any
 import asyncio
 import logging
 import inspect
 
-from app.services.coto import search_coto
-from app.services.carrefour import search
-from app.services.dia import search
-from app.services.jumbo import search
+# ===== Importar cada provider con alias (evita sobrescribir 'search') =====
+from app.services import coto as coto_svc
+from app.services import carrefour as carrefour_svc
+from app.services import dia as dia_svc
+from app.services import jumbo as jumbo_svc
 
 log = logging.getLogger(__name__)
 
-HEAVY_PROVIDERS = {"carrefour", "dia"}
+# Marcar los que usan navegador/pesados
+HEAVY_PROVIDERS = {"carrefour", "dia", "jumbo", "coto"}  # ajustá si hace falta
 
-PROVIDERS: Dict[str, Callable[..., List[Dict]]] = {
-    "carrefour": search,
-    "coto": search_coto,
-    "jumbo": search,
-    "dia": search,
+# Mapa de providers -> función
+PROVIDERS: Dict[str, Callable[..., List[Dict[str, Any]]]] = {
+    "carrefour": carrefour_svc.search,
+    "coto": coto_svc.search_coto,        # <- Coto expone search_coto(ctx=..., q=..., ...)
+    "jumbo": jumbo_svc.search,
+    "dia": dia_svc.search,
 }
 
 PER_PROVIDER_TIMEOUT = 15   # segundos máx por tienda
 OVERALL_TIMEOUT = 40        # máx para toda la búsqueda
 
 
-async def _invoke_provider(fn: Callable[..., List[Dict]],
-                           q: Optional[str],
-                           barcode: Optional[str],
-                           limit: int):
-    """Llama al provider, async o sync."""
+async def _invoke_provider(
+    fn: Callable[..., List[Dict]],
+    q: Optional[str],
+    barcode: Optional[str],
+    limit: int,
+    ctx: Any = None,
+):
+    """Llama al provider, pasando ctx solo si lo acepta."""
+    kwargs = {"q": q, "barcode": barcode, "limit": limit}
+    try:
+        params = inspect.signature(fn).parameters
+        if "ctx" in params:
+            kwargs["ctx"] = ctx
+    except Exception:
+        # si falla la introspección, no pasamos ctx
+        pass
+
     if inspect.iscoroutinefunction(fn):
-        return await fn(q=q, barcode=barcode, limit=limit)
+        return await fn(**kwargs)
     else:
-        return await asyncio.to_thread(fn, q, barcode, limit)
+        # Ejecutar sync sin bloquear el loop
+        return await asyncio.to_thread(fn, **kwargs)
 
 
-async def _run_provider(name: str,
-                        fn: Callable[..., List[Dict]],
-                        q: Optional[str],
-                        barcode: Optional[str],
-                        limit: int,
-                        sem: asyncio.Semaphore) -> List[Dict]:
+async def _run_provider(
+    name: str,
+    fn: Callable[..., List[Dict]],
+    q: Optional[str],
+    barcode: Optional[str],
+    limit: int,
+    sem: asyncio.Semaphore,
+    ctx: Any = None,
+) -> List[Dict]:
     """Ejecuta un provider con semáforo, timeout y manejo de errores."""
     try:
         async def _job():
             if name in HEAVY_PROVIDERS:
                 async with sem:
-                    return await _invoke_provider(fn, q, barcode, limit)
-            return await _invoke_provider(fn, q, barcode, limit)
+                    return await _invoke_provider(fn, q, barcode, limit, ctx)
+            return await _invoke_provider(fn, q, barcode, limit, ctx)
 
         res = await asyncio.wait_for(_job(), timeout=PER_PROVIDER_TIMEOUT)
 
@@ -72,8 +91,12 @@ async def search_all_grouped(
     barcode: Optional[str] = None,
     limit: int = 3,
     enabled: Optional[List[str]] = None,
+    ctx: Any = None,  # <- NUEVO: pasá acá tu BrowserContext/manager si lo tenés
 ) -> Dict[str, object]:
-    """Agrega resultados por tienda. Corre todo en paralelo con control de tiempo."""
+    """
+    Agrega resultados por tienda. Corre todo en paralelo con control de tiempo.
+    Si algunos providers necesitan 'ctx', pasalo en este parámetro.
+    """
     if not q and not barcode:
         empty = {k: [] for k in PROVIDERS.keys()}
         return {"results": empty, "count": 0, "enabled": list(PROVIDERS.keys())}
@@ -81,11 +104,12 @@ async def search_all_grouped(
     enabled_set = set(enabled or PROVIDERS.keys())
     active = {k: v for k, v in PROVIDERS.items() if k in enabled_set}
 
+    # Limitar paralelismo de scrapers pesados (navegador)
     browser_semaphore = asyncio.Semaphore(1)
 
     tasks = [
         asyncio.create_task(
-            _run_provider(name, fn, q, barcode, limit, browser_semaphore)
+            _run_provider(name, fn, q, barcode, limit, browser_semaphore, ctx)
         )
         for name, fn in active.items()
     ]
