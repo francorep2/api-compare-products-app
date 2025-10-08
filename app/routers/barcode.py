@@ -7,7 +7,7 @@ from fastapi import APIRouter, Query, HTTPException, Depends, Request
 from typing import Dict, List, Optional
 
 from app.models.search_item import SearchItem
-from app.services.coto import coto_search as search_coto
+from app.services.coto import search as search_coto
 from app.services.peer_name_resolver import resolve_product_name_from_peers
 from app.services.jumbo import search as search_jumbo
 from app.services.carrefour import search as search_carrefour
@@ -144,7 +144,7 @@ async def search_barcode_all(
     # --- FASE 1 ---
     initial_tasks = {
         "coto_direct": (
-            search_coto(ctx=ctx, barcode=barcode, limit=limit)   # ⬅️ pasar ctx
+            search_coto(barcode=barcode, limit=limit)   # ⬅️ pasar ctx
             if ("coto" in enabled_set and ctx is not None) else asyncio.sleep(0, result=[])
         ),
         "name_carrefour": resolve_name_carrefour(barcode) if "carrefour" in enabled_set else asyncio.sleep(0, result=None),
