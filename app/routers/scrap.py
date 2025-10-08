@@ -1,7 +1,7 @@
 from typing import List, Optional
 from fastapi import Query
 from app.models.search_item import SearchItem, SearchResponse
-from app.services.coto import coto_search as search_coto
+from app.services.coto import search as search_coto
 from app.services.dia import search  
 from app.services.carrefour import search
 from app.services.jumbo import search  
@@ -48,10 +48,9 @@ def _enabled_stores_from_prefs(prefs) -> List[str]:
 @router.get("/coto")
 async def search_coto_endpoint(
     q: str | None = Query(None),
-    barcode: str | None = Query(None),
     limit: int = Query(3, ge=1, le=10),
 ):
-    items = await search_coto(q=q, barcode=barcode, limit=limit)
+    items = await search_coto(q=q, limit=limit)
     return {"results": items}
 
 @router.get("/carrefour")
