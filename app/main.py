@@ -17,7 +17,6 @@ from contextlib import asynccontextmanager
 from playwright.async_api import async_playwright
 from app.routers import support
 from app.routers import list_comparator
-from app.db import init_tables_sync
 
 app = FastAPI(title="Groceries API", version="1.0.0")
 
