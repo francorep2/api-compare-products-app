@@ -16,9 +16,16 @@ from typing import Optional, Dict, List, Any
 from app.dependencies.auth import get_current_user, User
 from app.auth.models import ScrapePrefs
 from app.services.all import search_all_grouped
+from playwright.async_api import BrowserContext
+from app.core.browser_async import browser_manager_async
+
 
 router = APIRouter(prefix="/search", tags=["search"],dependencies=[Depends(get_current_user)],)
 
+async def get_ctx() -> BrowserContext:
+    async with browser_manager_async.new_context() as ctx:
+        yield ctx 
+        
 
 VALID_STORES = {"coto","carrefour","dia","jumbo"}
 
@@ -50,8 +57,9 @@ async def search_coto_endpoint(
     q: str | None = Query(None),
     barcode: str | None = Query(None),
     limit: int = Query(3, ge=1, le=10),
+    ctx: BrowserContext = Depends(get_ctx), 
 ):
-    items = await search_coto(q=q, barcode=barcode, limit=limit)
+    items = await search_coto(ctx=ctx, q=q, barcode=barcode, limit=limit)
     return {"results": items}
 
 @router.get("/carrefour")

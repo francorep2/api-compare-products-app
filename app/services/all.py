@@ -91,7 +91,7 @@ async def search_all_grouped(
     barcode: Optional[str] = None,
     limit: int = 3,
     enabled: Optional[List[str]] = None,
-    ctx: Any = None,  # <- NUEVO: pasá acá tu BrowserContext/manager si lo tenés
+    ctx: Any = None,
 ) -> Dict[str, object]:
     """
     Agrega resultados por tienda. Corre todo en paralelo con control de tiempo.
