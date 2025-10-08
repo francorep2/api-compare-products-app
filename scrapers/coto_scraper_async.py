@@ -26,9 +26,7 @@ def normalize_price(text: Optional[str]) -> Optional[str]:
     """Extrae y formatea el precio de un texto."""
     if not text:
         return None
-    # Limpia el texto, quita el símbolo de peso y normaliza espacios
     price_text = text.replace('$', '').strip()
-    # Busca números que pueden tener puntos como separadores de miles y coma para decimales
     match = re.search(r'([\d\.,]+)', price_text)
     if not match:
         return None
@@ -45,15 +43,12 @@ def normalize_promotion(text: Optional[str]) -> Optional[str]:
     if not text:
         return None
     
-    # Busca un porcentaje de descuento explícito primero
     pct_match = re.search(r'\b(\d{1,3})\s*%', text)
     if pct_match:
         return f"{pct_match.group(1)}% DTO"
 
-    # Si no, usa el normalizador general
     match = PROMO_NORMALIZER.search(text)
     if match:
-        # Encuentra el grupo que no es None
         promo_text = next((g for g in match.groups() if g is not None), None)
         if promo_text:
             return re.sub(r"\s+", " ", promo_text).upper().strip()
@@ -65,7 +60,6 @@ def normalize_promotion(text: Optional[str]) -> Optional[str]:
 async def coto_search_top_n(session: aiohttp.ClientSession, query: str, limit: int) -> List[Dict]:
     """
     Busca en Coto usando una única petición HTTP y parsea la grilla de resultados.
-    Esta es la función principal y optimizada.
     """
     search_url = (
         f"{COTO_BASE}/sitios/cdigi/categoria"
@@ -101,7 +95,6 @@ async def coto_search_top_n(session: aiohttp.ClientSession, query: str, limit: i
         if len(results) >= limit:
             break
 
-        # Extraer toda la información de la tarjeta del producto
         link_tag = item.find('a')
         product_url = urljoin(COTO_BASE, link_tag.get('href', '')) if link_tag else None
 
@@ -118,7 +111,6 @@ async def coto_search_top_n(session: aiohttp.ClientSession, query: str, limit: i
         promotion = normalize_promotion(promotion_div.text.strip() if promotion_div else None)
 
         barcode_container = item.find('div', id=lambda x: x and x.startswith('producto_'))
-        # El barcode aquí es en realidad el SKU de Coto, pero es un identificador útil.
         barcode = barcode_container['id'].split('_')[1] if barcode_container else None
 
         results.append({
@@ -132,23 +124,27 @@ async def coto_search_top_n(session: aiohttp.ClientSession, query: str, limit: i
         
     return results
 
-# ===================== API Pública del Scraper =====================
+# ===================== API Pública del Scraper (CORREGIDA) =====================
 
-async def search(ctx: Dict, q: Optional[str] = None, barcode: Optional[str] = None, limit: int = TOP_N) -> List[Dict]:
+async def search(ctx: Optional[Dict], q: Optional[str] = None, barcode: Optional[str] = None, limit: int = TOP_N) -> List[Dict]:
     """
-    Función de entrada del scraper. Utiliza una sesión aiohttp compartida si existe,
-    o crea una nueva.
+    Función de entrada del scraper. Maneja de forma segura el contexto `ctx`,
+    sin importar si es un diccionario o un objeto BrowserContext.
     """
     query = q.strip() if q and q.strip() else barcode
     if not query:
         return []
 
-    # Reutiliza la sesión si el agregador la pasa en el contexto, si no, crea una.
-    # Esto es una buena práctica para evitar crear conexiones TCP en cada llamada.
-    session = ctx.get("aiohttp_session")
+    # --- FIX: Verificamos si ctx es un diccionario y tiene la sesión ---
+    # Esto evita el AttributeError si ctx es un BrowserContext u otro objeto.
+    session = None
+    if isinstance(ctx, dict):
+        session = ctx.get("aiohttp_session")
     
+    # Si se nos proveyó una sesión, la usamos.
     if session:
         return await coto_search_top_n(session, query, limit)
     else:
+        # Si no, creamos una sesión temporal para esta única ejecución.
         async with aiohttp.ClientSession() as new_session:
             return await coto_search_top_n(new_session, query, limit)
