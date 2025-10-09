@@ -88,7 +88,7 @@ def absolutize(base: str, href: str, current_url: Optional[str] = None) -> str:
 async def _enable_speed_routes(page):
     async def _route_handler(route):
         try:
-            if route.request.resource_type in {"image", "font", "media", "stylesheet"}:
+            if route.request.resource_type in {"image", "font", "media"}:
                 return await route.abort()
         except Exception:
             pass
@@ -595,18 +595,30 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
         resp = await _goto_with_retries(page, search_url, wait_until="domcontentloaded", timeout=DEFAULT_SEARCH_TIMEOUT_MS)
         print(f"[LOG] Classic status: {resp.status if resp else 'N/A'} | title: {await page.title()}")
 
-        # intentar que cargue todo el grid
+        # esperar anclas de productos con reintentos cortos
+        anchors_selector = "a[href*='/sitios/cdigi/productos/']"
+        got_anchors = False
         try:
-            await page.wait_for_load_state("networkidle", timeout=1200)
-        except:
+            await page.wait_for_selector(anchors_selector, timeout=3500)
+            got_anchors = True
+        except Exception:
             pass
+        if not got_anchors:
+            # hacer un par de scrolls y reintentar
+            try:
+                for _ in range(2):
+                    await page.mouse.wheel(0, 1200)
+                    await asyncio.sleep(0.2)
+                await page.wait_for_selector(anchors_selector, timeout=2000)
+                got_anchors = True
+            except Exception:
+                got_anchors = False
 
         # 1) levantar anchors del grid
-        anchors = None
+        anchors = page.locator(anchors_selector)
         try:
-            anchors = page.locator("a[href*='/sitios/cdigi/productos/']")
-            total = await anchors.count()
-        except:
+            total = await anchors.count() if got_anchors else await anchors.count()
+        except Exception:
             total = 0
 
         hrefs_with_cardpromo: List[tuple[str, Optional[str]]] = []
@@ -662,6 +674,7 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
 
         if not hrefs_with_cardpromo:
             await save_debug_html(page, "coto_classic_empty")
+            await save_debug_html(page, "coto_classic_empty_after_wait")
             return []
 
         # 3) visitar PDPs concurrentemente (con límite) y armar resultados
