@@ -11,8 +11,10 @@ COTO_BASE = "https://www.cotodigital.com.ar"
 COTO_STATIC_HOST = "https://static.cotodigital3.com.ar"
 COTO_SUCURSAL_ID = 200
 
-CONCURRENCY_LIMIT = 4
-DEFAULT_TIMEOUT_MS = 35000
+CONCURRENCY_LIMIT = 8
+DEFAULT_TIMEOUT_MS = 10000          # timeout base para navegaciones rápidas
+DEFAULT_SEARCH_TIMEOUT_MS = 8000    # navegación de página de resultados
+PDP_TIMEOUT_MS = 2000               # límite estricto por PDP
 
 # ===================== Texto / matching =====================
 
@@ -81,6 +83,17 @@ def absolutize(base: str, href: str, current_url: Optional[str] = None) -> str:
     parts = base.split("/", 3)
     path = href if href.startswith("/") else ("/"+href)
     return f"{parts[0]}//{parts[2]}{path}"
+
+# Bloqueo de recursos pesados para acelerar cargas
+async def _enable_speed_routes(page):
+    async def _route_handler(route):
+        try:
+            if route.request.resource_type in {"image", "font", "media", "stylesheet"}:
+                return await route.abort()
+        except Exception:
+            pass
+        await route.continue_()
+    await page.route("**/*", _route_handler)
 
 
 # Navegación robusta con reintentos
@@ -322,6 +335,10 @@ async def parse_jsonld_product(page):
     return None
 
 async def parse_meta_price_dom(page) -> Optional[str]:
+    try:
+        await asyncio.wait_for(page.wait_for_selector("meta[itemprop='price'], meta[property='product:price:amount']", timeout=300), timeout=0.35)
+    except Exception:
+        pass
     for sel in ["meta[itemprop='price']", "meta[property='product:price:amount']"]:
         el = page.locator(sel).first
         if await el.count():
@@ -505,18 +522,10 @@ async def fetch_coto_pdp(ctx, href, timeout=DEFAULT_TIMEOUT_MS) -> Dict:
         url = absolutize(COTO_BASE, href)
         url = sanitize_coto_href(url)
         print(f"[LOG] PDP GET {url}")
-        # navegación más resiliente + carga rápida
-        await _goto_with_retries(page, url, wait_until="domcontentloaded", timeout=timeout)
-        # intentar estabilizar peticiones sin bloquear demasiado
+        # navegación rápida
+        await _goto_with_retries(page, url, wait_until="domcontentloaded", timeout=min(timeout, PDP_TIMEOUT_MS))
         try:
-            await page.wait_for_load_state("networkidle", timeout=4000)
-        except Exception:
-            pass
-        # pequeño scroll para disparar lazy-loads
-        try:
-            for _ in range(2):
-                await page.mouse.wheel(0, 800)
-                await asyncio.sleep(0.2)
+            await page.wait_for_load_state("networkidle", timeout=800)
         except Exception:
             pass
 
@@ -580,20 +589,17 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
     )
 
     page = await ctx.new_page()
+    await _enable_speed_routes(page)
     try:
         print(f"[LOG] Coto classic GET {search_url}")
-        resp = await _goto_with_retries(page, search_url, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
+        resp = await _goto_with_retries(page, search_url, wait_until="domcontentloaded", timeout=DEFAULT_SEARCH_TIMEOUT_MS)
         print(f"[LOG] Classic status: {resp.status if resp else 'N/A'} | title: {await page.title()}")
 
         # intentar que cargue todo el grid
         try:
-            await page.wait_for_load_state("networkidle", timeout=6000)
+            await page.wait_for_load_state("networkidle", timeout=1200)
         except:
             pass
-
-        for _ in range(3):
-            await page.mouse.wheel(0, 1200)
-            await asyncio.sleep(0.25)
 
         # 1) levantar anchors del grid
         anchors = None
@@ -606,7 +612,7 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
         hrefs_with_cardpromo: List[tuple[str, Optional[str]]] = []
 
         if total:
-            take = min(total, max(24, limit * 8))
+            take = min(total, max(8, limit * 5))
             for i in range(take):
                 a = anchors.nth(i)
                 href = (await a.get_attribute("href")) or ""
@@ -663,15 +669,21 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
         seen: set[str] = set()
         sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
-        async def _fetch_bounded(href: str, card_promo: Optional[str]):
-            async with sem:
-                pdp = await fetch_coto_pdp(ctx, href, timeout=DEFAULT_TIMEOUT_MS)
-                # si la PDP no trajo promo, usar la de la card
+        tasks = []
+        for h, cp in hrefs_with_cardpromo:
+            async def _job(href=h, card_promo=cp):
+                try:
+                    pdp = await asyncio.wait_for(
+                        fetch_coto_pdp(ctx, href, timeout=PDP_TIMEOUT_MS),
+                        timeout=PDP_TIMEOUT_MS/1000.0,
+                    )
+                except Exception:
+                    # fallback mínimo con lo que tenemos si la PDP no responde a tiempo
+                    pdp = {"title": None, "price": None, "url": href, "image_url": None, "barcode": None, "promotion": card_promo}
                 if pdp.get("promotion") is None and card_promo:
                     pdp["promotion"] = card_promo
                 return pdp
-
-        tasks = [asyncio.create_task(_fetch_bounded(h, cp)) for h, cp in hrefs_with_cardpromo]
+            tasks.append(asyncio.create_task(_job()))
 
         try:
             for coro in asyncio.as_completed(tasks):
@@ -686,12 +698,10 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
                 if len(results) >= limit:
                     break
         finally:
-            # cancelar tareas restantes si ya cumplimos el límite
             if len(results) >= limit:
                 for t in tasks:
                     if not t.done():
                         t.cancel()
-                # esperar cancelaciones silenciosamente
                 await asyncio.gather(*tasks, return_exceptions=True)
 
         if not results:
