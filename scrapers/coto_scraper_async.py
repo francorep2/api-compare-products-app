@@ -14,7 +14,7 @@ COTO_SUCURSAL_ID = 200
 CONCURRENCY_LIMIT = 8
 DEFAULT_TIMEOUT_MS = 10000          # timeout base para navegaciones rápidas
 DEFAULT_SEARCH_TIMEOUT_MS = 8000    # navegación de página de resultados
-PDP_TIMEOUT_MS = 2000               # límite estricto por PDP
+PDP_TIMEOUT_MS = 6000               # límite más amplio por PDP (evita nulls)
 
 # ===================== Texto / matching =====================
 
@@ -522,10 +522,15 @@ async def fetch_coto_pdp(ctx, href, timeout=DEFAULT_TIMEOUT_MS) -> Dict:
         url = absolutize(COTO_BASE, href)
         url = sanitize_coto_href(url)
         print(f"[LOG] PDP GET {url}")
-        # navegación rápida
+        # navegación con margen para cargar DOM principal
         await _goto_with_retries(page, url, wait_until="domcontentloaded", timeout=min(timeout, PDP_TIMEOUT_MS))
         try:
-            await page.wait_for_load_state("networkidle", timeout=800)
+            await page.wait_for_load_state("networkidle", timeout=1500)
+        except Exception:
+            pass
+        # asegurar que aparece un título o zona de precio (sin bloquear de más)
+        try:
+            await page.wait_for_selector("h1, h1[itemprop='name'], .product-name, [itemprop='price'], .price, .best-price", timeout=1200)
         except Exception:
             pass
 
@@ -549,6 +554,16 @@ async def fetch_coto_pdp(ctx, href, timeout=DEFAULT_TIMEOUT_MS) -> Dict:
         if not price: price = await parse_meta_price_dom(page)
         if not price: price = await parse_regex_from_html(page)
         if not title: title = clean_text(await page.title())
+
+        # (opcional robustez): si aún no hay título, probar og:title
+        if not title:
+            try:
+                ogt = page.locator("meta[property='og:title']").first
+                if await ogt.count():
+                    t = await ogt.get_attribute("content")
+                    title = clean_text(t) if t else title
+            except Exception:
+                pass
 
         # imagen
         image_url = await extract_image_url(page, url)
@@ -688,7 +703,7 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
                 try:
                     pdp = await asyncio.wait_for(
                         fetch_coto_pdp(ctx, href, timeout=PDP_TIMEOUT_MS),
-                        timeout=PDP_TIMEOUT_MS/1000.0,
+                        timeout=(PDP_TIMEOUT_MS/1000.0) + 0.5,
                     )
                 except Exception:
                     # fallback mínimo con lo que tenemos si la PDP no responde a tiempo
