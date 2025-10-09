@@ -11,6 +11,9 @@ COTO_BASE = "https://www.cotodigital.com.ar"
 COTO_STATIC_HOST = "https://static.cotodigital3.com.ar"
 COTO_SUCURSAL_ID = 200
 
+CONCURRENCY_LIMIT = 4
+DEFAULT_TIMEOUT_MS = 35000
+
 # ===================== Texto / matching =====================
 
 def _norm_text(s: str) -> str:
@@ -78,6 +81,22 @@ def absolutize(base: str, href: str, current_url: Optional[str] = None) -> str:
     parts = base.split("/", 3)
     path = href if href.startswith("/") else ("/"+href)
     return f"{parts[0]}//{parts[2]}{path}"
+
+
+# Navegación robusta con reintentos
+async def _goto_with_retries(page, url: str, wait_until: str = "domcontentloaded", timeout: int = DEFAULT_TIMEOUT_MS, attempts: int = 2):
+    last_err = None
+    for i in range(attempts):
+        try:
+            return await page.goto(url, wait_until=wait_until, timeout=timeout)
+        except Exception as e:
+            last_err = e
+            # pequeño backoff progresivo
+            try:
+                await asyncio.sleep(0.25 * (i + 1))
+            except Exception:
+                pass
+    raise last_err if last_err else RuntimeError("goto failed without exception")
 
 def _digits(s: Optional[str]) -> str:
     return re.sub(r"\D", "", s or "")
@@ -342,15 +361,21 @@ async def parse_meta_price_dom(page) -> Optional[str]:
 
 async def parse_regex_from_html(page) -> Optional[str]:
     html = await page.content()
-    m = re.findall(r"(?:\$|ARS)\s*[\d\. ]{1,}(?:,\d{2})?", html, flags=re.I)
-    best = None
-    for s in m:
+    matches = re.findall(r"(?:\$|ARS)\s*[\d\. ]{1,}(?:,\d{2})?", html, flags=re.I)
+    best_val = None
+    best_str = None
+    for s in matches:
         pr = normalize_price(s)
-        if pr:
-            val = float(pr.replace("ARS","").replace("$","").strip())
-            if not best or val > best[0]:
-                best = (val, pr)
-    return best[1] if best else None
+        if not pr:
+            continue
+        try:
+            val = float(pr.replace("ARS", "").replace("$", "").strip())
+        except Exception:
+            continue
+        if best_val is None or val > best_val:
+            best_val = val
+            best_str = pr
+    return best_str
 
 # ===================== Imagen estática Coto =====================
 
@@ -474,17 +499,26 @@ def sanitize_coto_href(href:str) -> str:
     new_query = urllib.parse.urlencode(pairs, doseq=True)
     return f"{base}?{new_query}"
 
-async def fetch_coto_pdp(ctx, href, timeout=60000) -> Dict:
+async def fetch_coto_pdp(ctx, href, timeout=DEFAULT_TIMEOUT_MS) -> Dict:
     page = await ctx.new_page()
     try:
         url = absolutize(COTO_BASE, href)
         url = sanitize_coto_href(url)
         print(f"[LOG] PDP GET {url}")
-        await page.goto(url, wait_until="networkidle", timeout=timeout)
-
-        for _ in range(2):
-            await page.mouse.wheel(0, 800)
-            await asyncio.sleep(0.2)
+        # navegación más resiliente + carga rápida
+        await _goto_with_retries(page, url, wait_until="domcontentloaded", timeout=timeout)
+        # intentar estabilizar peticiones sin bloquear demasiado
+        try:
+            await page.wait_for_load_state("networkidle", timeout=4000)
+        except Exception:
+            pass
+        # pequeño scroll para disparar lazy-loads
+        try:
+            for _ in range(2):
+                await page.mouse.wheel(0, 800)
+                await asyncio.sleep(0.2)
+        except Exception:
+            pass
 
         # título
         title = None
@@ -548,7 +582,7 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
     page = await ctx.new_page()
     try:
         print(f"[LOG] Coto classic GET {search_url}")
-        resp = await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+        resp = await _goto_with_retries(page, search_url, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
         print(f"[LOG] Classic status: {resp.status if resp else 'N/A'} | title: {await page.title()}")
 
         # intentar que cargue todo el grid
@@ -585,35 +619,80 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
                 except:
                     card_promo = None
                 hrefs_with_cardpromo.append((href, card_promo))
+            # normalizar y deduplicar por HREF base antes de ir a PDPs
+            norm_pairs = []
+            seen_href = set()
+            for h, cp in hrefs_with_cardpromo:
+                try:
+                    full = absolutize(COTO_BASE, h)
+                    full = sanitize_coto_href(full)
+                except Exception:
+                    full = h
+                if full in seen_href:
+                    continue
+                seen_href.add(full)
+                norm_pairs.append((full, cp))
+            hrefs_with_cardpromo = norm_pairs
         else:
             # 2) fallback: parsear HTML manualmente (sin promo de card)
             html = await page.content()
             found = re.findall(r'href="([^"]+/sitios/cdigi/productos/[^"]+)"', html, flags=re.I)
             for h in found:
                 hrefs_with_cardpromo.append((h, None))
+            # normalizar y deduplicar por HREF base antes de ir a PDPs
+            norm_pairs = []
+            seen_href = set()
+            for h, cp in hrefs_with_cardpromo:
+                try:
+                    full = absolutize(COTO_BASE, h)
+                    full = sanitize_coto_href(full)
+                except Exception:
+                    full = h
+                if full in seen_href:
+                    continue
+                seen_href.add(full)
+                norm_pairs.append((full, cp))
+            hrefs_with_cardpromo = norm_pairs
 
         if not hrefs_with_cardpromo:
             await save_debug_html(page, "coto_classic_empty")
             return []
 
-        # 3) visitar PDPs y armar resultados
+        # 3) visitar PDPs concurrentemente (con límite) y armar resultados
         results: List[Dict] = []
         seen: set[str] = set()
+        sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
-        for href, card_promo in hrefs_with_cardpromo:
-            pdp = await fetch_coto_pdp(ctx, href)
-            final_url = pdp.get("url") or sanitize_coto_href(absolutize(COTO_BASE, href))
-            if not final_url or final_url in seen:
-                continue
+        async def _fetch_bounded(href: str, card_promo: Optional[str]):
+            async with sem:
+                pdp = await fetch_coto_pdp(ctx, href, timeout=DEFAULT_TIMEOUT_MS)
+                # si la PDP no trajo promo, usar la de la card
+                if pdp.get("promotion") is None and card_promo:
+                    pdp["promotion"] = card_promo
+                return pdp
 
-            # si la PDP no trajo promo, usar la de la card
-            if pdp.get("promotion") is None and card_promo:
-                pdp["promotion"] = card_promo
+        tasks = [asyncio.create_task(_fetch_bounded(h, cp)) for h, cp in hrefs_with_cardpromo]
 
-            seen.add(final_url)
-            results.append(pdp)
+        try:
+            for coro in asyncio.as_completed(tasks):
+                pdp = await coro
+                final_url = pdp.get("url") or None
+                if not final_url:
+                    continue
+                if final_url in seen:
+                    continue
+                seen.add(final_url)
+                results.append(pdp)
+                if len(results) >= limit:
+                    break
+        finally:
+            # cancelar tareas restantes si ya cumplimos el límite
             if len(results) >= limit:
-                break
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                # esperar cancelaciones silenciosamente
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         if not results:
             await save_debug_html(page, "coto_classic_no_matches")
@@ -634,7 +713,7 @@ async def coto_search_by_barcode(ctx, ean: str, limit: int = TOP_N) -> List[Dict
     out = []
     for item in prelim:
         bc = item.get("barcode")
-        if bc and bc == ean:
+        if bc and str(bc) == ean:
             out.append(item)
         if len(out) == limit:
             break
