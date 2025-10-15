@@ -3,30 +3,27 @@ import asyncio
 import logging
 import inspect
 
-# Importa el manager del navegador
+# 1. Importa el manager del navegador y las funciones de scraper específicas
 from app.core.browser_async import browser_manager_async
-
-# Importa cada función de scraper
-from app.services.coto import search_coto
-from app.services.carrefour import search
-from app.services.dia import search
-from app.services.jumbo import search
+from app.services.coto import search as search_coto
+from app.services.carrefour import search as search_carrefour
+from app.services.dia import search as search_dia
+from app.services.jumbo import search as search_jumbo
 
 log = logging.getLogger(__name__)
 
-# Define qué scrapers necesitan un navegador
+# 2. Define qué scrapers usan navegador y el mapeo de funciones
 BROWSER_PROVIDERS = {"coto"}
 
-# Mapeo de nombres a funciones
 PROVIDERS: Dict[str, Callable] = {
-    "carrefour": search,
+    "carrefour": search_carrefour,
     "coto": search_coto,
-    "jumbo": search,
-    "dia": search,
+    "jumbo": search_jumbo,
+    "dia": search_dia,
 }
 
 PER_PROVIDER_TIMEOUT = 25
-OVERALL_TIMEOUT = 40
+OVERALL_TIMEOUT = 45
 
 async def _run_provider(
     name: str,
@@ -34,16 +31,17 @@ async def _run_provider(
     q: Optional[str],
     barcode: Optional[str],
     limit: int,
-    ctx: Optional[Any] = None,
+    ctx: Optional[Any] = None
 ) -> List[Dict]:
     """Ejecuta un scraper individual, pasándole el contexto si lo necesita."""
     try:
         kwargs = {"q": q, "barcode": barcode, "limit": limit}
-        if name in BROWSER_PROVIDERS:
+        # Solo añade 'ctx' si la función lo espera
+        if "ctx" in inspect.signature(fn).parameters:
+            if ctx is None:
+                log.error(f"[{name}] es un scraper de navegador pero no recibió un contexto.")
+                return []
             kwargs["ctx"] = ctx
-
-        if not inspect.iscoroutinefunction(fn):
-            return await asyncio.to_thread(fn, **kwargs)
 
         res = await asyncio.wait_for(fn(**kwargs), timeout=PER_PROVIDER_TIMEOUT)
         
@@ -77,18 +75,18 @@ async def search_all_grouped(
     tasks = []
     
     # Separa las tareas: las que usan navegador y las que no
-    api_tasks = {name: fn for name, fn in active_providers.items() if name not in BROWSER_PROVIDERS}
-    browser_tasks = {name: fn for name, fn in active_providers.items() if name in BROWSER_PROVIDERS}
+    api_providers = {name: fn for name, fn in active_providers.items() if name not in BROWSER_PROVIDERS}
+    browser_providers = {name: fn for name, fn in active_providers.items() if name in BROWSER_PROVIDERS}
 
     # Lanza las tareas de API (rápidas)
-    for name, fn in api_tasks.items():
+    for name, fn in api_providers.items():
         tasks.append(_run_provider(name, fn, q, barcode, limit))
 
     # Si hay tareas de navegador, abre un contexto y las lanza
-    if browser_tasks:
+    if browser_providers:
         try:
             async with browser_manager_async.new_context() as ctx:
-                for name, fn in browser_tasks.items():
+                for name, fn in browser_providers.items():
                     tasks.append(_run_provider(name, fn, q, barcode, limit, ctx=ctx))
                 
                 # Ejecuta todo junto
@@ -96,15 +94,16 @@ async def search_all_grouped(
         except Exception as e:
             log.error(f"No se pudo iniciar el contexto del navegador: {e}")
             # Si el navegador falla, corremos solo las de API
-            api_only_results = await asyncio.gather(*[t for t in tasks if not t.get_name() in browser_tasks])
-            results_list = api_only_results + [[] for _ in browser_tasks]
+            api_only_tasks = [t for name, t in zip(active_providers.keys(), tasks) if name not in BROWSER_PROVIDERS]
+            api_only_results = await asyncio.gather(*api_only_tasks)
+            results_list = api_only_results + [[] for _ in browser_providers] # Rellena con vacíos
     else:
         # Si no hay tareas de navegador, solo ejecuta las de API
         results_list = await asyncio.gather(*tasks)
 
     # Mapea los resultados
     results_per_store = dict(zip(active_providers.keys(), results_list))
-    total_count = sum(len(v) for v in results_per_store.values())
+    total_count = sum(len(v or []) for v in results_per_store.values())
 
     return {
         "results": results_per_store,
