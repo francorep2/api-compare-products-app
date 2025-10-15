@@ -3,28 +3,29 @@ import asyncio
 import logging
 import inspect
 
-# 1. Importa el manager del navegador
+# Importa el manager del navegador
 from app.core.browser_async import browser_manager_async
 
-# 2. Importa cada función de scraper con un alias claro
-from app.services.coto import search as search_coto
-from app.services.carrefour import search as search_carrefour
-from app.services.dia import search as search_dia
-from app.services.jumbo import search as search_jumbo
+# Importa cada función de scraper
+from app.services.coto import search_coto
+from app.services.carrefour import search
+from app.services.dia import search
+from app.services.jumbo import search
 
 log = logging.getLogger(__name__)
 
-# 3. Define qué scrapers necesitan un navegador
+# Define qué scrapers necesitan un navegador
 BROWSER_PROVIDERS = {"coto"}
 
+# Mapeo de nombres a funciones
 PROVIDERS: Dict[str, Callable] = {
-    "carrefour": search_carrefour,
+    "carrefour": search,
     "coto": search_coto,
-    "jumbo": search_jumbo,
-    "dia": search_dia,
+    "jumbo": search,
+    "dia": search,
 }
 
-PER_PROVIDER_TIMEOUT = 25  # Aumentado para dar margen a Playwright
+PER_PROVIDER_TIMEOUT = 25
 OVERALL_TIMEOUT = 40
 
 async def _run_provider(
@@ -33,14 +34,16 @@ async def _run_provider(
     q: Optional[str],
     barcode: Optional[str],
     limit: int,
-    ctx: Optional[Any] = None
+    ctx: Optional[Any] = None,
 ) -> List[Dict]:
     """Ejecuta un scraper individual, pasándole el contexto si lo necesita."""
     try:
         kwargs = {"q": q, "barcode": barcode, "limit": limit}
-        # Solo añade 'ctx' si la función lo espera
-        if "ctx" in inspect.signature(fn).parameters:
+        if name in BROWSER_PROVIDERS:
             kwargs["ctx"] = ctx
+
+        if not inspect.iscoroutinefunction(fn):
+            return await asyncio.to_thread(fn, **kwargs)
 
         res = await asyncio.wait_for(fn(**kwargs), timeout=PER_PROVIDER_TIMEOUT)
         
@@ -72,37 +75,35 @@ async def search_all_grouped(
     active_providers = {k: v for k, v in PROVIDERS.items() if k in enabled_set}
 
     tasks = []
-    active_names = []
-    browser_providers_to_run = {k: v for k, v in active_providers.items() if k in BROWSER_PROVIDERS}
     
-    # 4. Crea tareas para scrapers que NO usan navegador
-    for name, fn in active_providers.items():
-        if name not in BROWSER_PROVIDERS:
-            active_names.append(name)
-            tasks.append(_run_provider(name, fn, q, barcode, limit))
+    # Separa las tareas: las que usan navegador y las que no
+    api_tasks = {name: fn for name, fn in active_providers.items() if name not in BROWSER_PROVIDERS}
+    browser_tasks = {name: fn for name, fn in active_providers.items() if name in BROWSER_PROVIDERS}
 
-    # 5. Si hay scrapers de navegador, crea un contexto y sus tareas
-    if browser_providers_to_run:
+    # Lanza las tareas de API (rápidas)
+    for name, fn in api_tasks.items():
+        tasks.append(_run_provider(name, fn, q, barcode, limit))
+
+    # Si hay tareas de navegador, abre un contexto y las lanza
+    if browser_tasks:
         try:
             async with browser_manager_async.new_context() as ctx:
-                for name, fn in browser_providers_to_run.items():
-                    active_names.append(name)
+                for name, fn in browser_tasks.items():
                     tasks.append(_run_provider(name, fn, q, barcode, limit, ctx=ctx))
                 
-                # Ejecuta todas las tareas juntas
+                # Ejecuta todo junto
                 results_list = await asyncio.gather(*tasks)
         except Exception as e:
             log.error(f"No se pudo iniciar el contexto del navegador: {e}")
-            # Si el navegador falla, las tareas de Coto no se ejecutan, pero las otras sí.
-            # Necesitamos manejar los resultados parciales.
-            api_only_results = await asyncio.gather(*[t for t in tasks if name not in browser_providers_to_run])
-            results_list = api_only_results + [[] for _ in browser_providers_to_run] # Rellena con vacíos
+            # Si el navegador falla, corremos solo las de API
+            api_only_results = await asyncio.gather(*[t for t in tasks if not t.get_name() in browser_tasks])
+            results_list = api_only_results + [[] for _ in browser_tasks]
     else:
-        # Si no hay scrapers de navegador, simplemente ejecuta las tareas de API
+        # Si no hay tareas de navegador, solo ejecuta las de API
         results_list = await asyncio.gather(*tasks)
 
-    # 6. Mapea los resultados de vuelta
-    results_per_store = dict(zip(active_names, results_list))
+    # Mapea los resultados
+    results_per_store = dict(zip(active_providers.keys(), results_list))
     total_count = sum(len(v) for v in results_per_store.values())
 
     return {
