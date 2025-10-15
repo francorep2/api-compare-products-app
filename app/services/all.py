@@ -1,20 +1,19 @@
 from typing import Dict, List, Optional, Callable, Any
 import asyncio
 import logging
-import inspect
 
-# 1. Importa el manager del navegador y las funciones de scraper específicas
 from app.core.browser_async import browser_manager_async
-from app.services.coto import search as search_coto
+from app.services.coto import search_coto        # <-- ojo: usar el nombre real exportado
 from app.services.carrefour import search as search_carrefour
 from app.services.dia import search as search_dia
 from app.services.jumbo import search as search_jumbo
 
 log = logging.getLogger(__name__)
 
-# 2. Define qué scrapers usan navegador y el mapeo de funciones
+# Scrapers que requieren Playwright (ctx)
 BROWSER_PROVIDERS = {"coto"}
 
+# Orden de proveedores (mantener orden determinístico)
 PROVIDERS: Dict[str, Callable] = {
     "carrefour": search_carrefour,
     "coto": search_coto,
@@ -22,8 +21,8 @@ PROVIDERS: Dict[str, Callable] = {
     "dia": search_dia,
 }
 
-PER_PROVIDER_TIMEOUT = 25
-OVERALL_TIMEOUT = 45
+PER_PROVIDER_TIMEOUT = 25   # segundos
+OVERALL_TIMEOUT = 45        # segundos (timeout global de la búsqueda)
 
 async def _run_provider(
     name: str,
@@ -31,29 +30,32 @@ async def _run_provider(
     q: Optional[str],
     barcode: Optional[str],
     limit: int,
-    ctx: Optional[Any] = None
+    ctx: Optional[Any] = None,
 ) -> List[Dict]:
-    """Ejecuta un scraper individual, pasándole el contexto si lo necesita."""
+    """
+    Ejecuta un scraper individual con timeout por proveedor.
+    Pasa ctx solo si el proveedor lo necesita.
+    """
     try:
         kwargs = {"q": q, "barcode": barcode, "limit": limit}
-        # Solo añade 'ctx' si la función lo espera
-        if "ctx" in inspect.signature(fn).parameters:
+        if name in BROWSER_PROVIDERS:
             if ctx is None:
-                log.error(f"[{name}] es un scraper de navegador pero no recibió un contexto.")
+                log.error(f"[{name}] requiere navegador pero no recibió contexto.")
                 return []
             kwargs["ctx"] = ctx
 
+        # TODOS los scrapers deben ser async. Si alguno es sync, envolver con to_thread.
         res = await asyncio.wait_for(fn(**kwargs), timeout=PER_PROVIDER_TIMEOUT)
-        
+
         if not isinstance(res, list):
-            log.warning(f"[{name}] El scraper devolvió un tipo inesperado: {type(res)}")
+            log.warning(f"[{name}] devolvió tipo inesperado: {type(res)}")
             return []
         return res
     except asyncio.TimeoutError:
-        log.warning(f"[{name}] Timeout: excedió los {PER_PROVIDER_TIMEOUT}s")
+        log.warning(f"[{name}] Timeout: excedió {PER_PROVIDER_TIMEOUT}s")
         return []
     except Exception as e:
-        log.exception(f"[{name}] Falló con una excepción: {e}")
+        log.exception(f"[{name}] Excepción: {e}")
         return []
 
 async def search_all_grouped(
@@ -63,50 +65,86 @@ async def search_all_grouped(
     enabled: Optional[List[str]] = None,
 ) -> Dict[str, object]:
     """
-    Agrega resultados por tienda. Corre en paralelo y gestiona el navegador
-    solo cuando es necesario.
+    Ejecuta scrapers en paralelo y agrupa respuestas por tienda.
+    No mezcla resultados: usa un mapa nombre->task y luego nombre->resultado.
     """
     if not q and not barcode:
-        return {"results": {k: [] for k in PROVIDERS}, "count": 0, "enabled": list(PROVIDERS.keys())}
+        return {
+            "results": {k: [] for k in PROVIDERS.keys()},
+            "count": 0,
+            "enabled": list(PROVIDERS.keys()),
+        }
 
+    # Filtrar proveedores habilitados respetando el orden de PROVIDERS
     enabled_set = set(enabled or PROVIDERS.keys())
-    active_providers = {k: v for k, v in PROVIDERS.items() if k in enabled_set}
+    active_providers: Dict[str, Callable] = {
+        k: v for k, v in PROVIDERS.items() if k in enabled_set
+    }
 
-    tasks = []
-    
-    # Separa las tareas: las que usan navegador y las que no
+    # Separar API vs Browser
     api_providers = {name: fn for name, fn in active_providers.items() if name not in BROWSER_PROVIDERS}
     browser_providers = {name: fn for name, fn in active_providers.items() if name in BROWSER_PROVIDERS}
 
-    # Lanza las tareas de API (rápidas)
-    for name, fn in api_providers.items():
-        tasks.append(_run_provider(name, fn, q, barcode, limit))
+    # Mapa nombre -> task
+    task_map: Dict[str, asyncio.Task] = {}
 
-    # Si hay tareas de navegador, abre un contexto y las lanza
-    if browser_providers:
-        try:
+    async def _run_all_with_ctx(ctx=None):
+        # Crear tasks de API
+        for name, fn in api_providers.items():
+            task_map[name] = asyncio.create_task(_run_provider(name, fn, q, barcode, limit, ctx=None))
+        # Crear tasks de Browser (si hay ctx)
+        if browser_providers:
+            if ctx is None:
+                # No hay contexto; devolveremos [] a los de browser luego
+                return
+            for name, fn in browser_providers.items():
+                task_map[name] = asyncio.create_task(_run_provider(name, fn, q, barcode, limit, ctx=ctx))
+
+    try:
+        if browser_providers:
+            # Abrir un contexto SOLO si hay scrapers que lo necesitan
             async with browser_manager_async.new_context() as ctx:
-                for name, fn in browser_providers.items():
-                    tasks.append(_run_provider(name, fn, q, barcode, limit, ctx=ctx))
-                
-                # Ejecuta todo junto
-                results_list = await asyncio.gather(*tasks)
-        except Exception as e:
-            log.error(f"No se pudo iniciar el contexto del navegador: {e}")
-            # Si el navegador falla, corremos solo las de API
-            api_only_tasks = [t for name, t in zip(active_providers.keys(), tasks) if name not in BROWSER_PROVIDERS]
-            api_only_results = await asyncio.gather(*api_only_tasks)
-            results_list = api_only_results + [[] for _ in browser_providers] # Rellena con vacíos
-    else:
-        # Si no hay tareas de navegador, solo ejecuta las de API
-        results_list = await asyncio.gather(*tasks)
+                await _run_all_with_ctx(ctx)
+                # Timeout global para la suma de todas las tareas
+                await asyncio.wait_for(asyncio.gather(*task_map.values()), timeout=OVERALL_TIMEOUT)
+        else:
+            await _run_all_with_ctx(ctx=None)
+            await asyncio.wait_for(asyncio.gather(*task_map.values()), timeout=OVERALL_TIMEOUT)
 
-    # Mapea los resultados
-    results_per_store = dict(zip(active_providers.keys(), results_list))
-    total_count = sum(len(v or []) for v in results_per_store.values())
+    except asyncio.TimeoutError:
+        log.warning(f"[ALL] Timeout global: excedió {OVERALL_TIMEOUT}s")
+        # dejá que se recolecten lo que haya terminado
+    except Exception as e:
+        log.error(f"[ALL] Error al ejecutar scrapers: {e}")
+
+        # Si el error fue al crear el contexto del navegador,
+        # ejecutamos solo API y marcamos browser como vacío.
+        if not task_map and api_providers:
+            # reintento: solo API
+            for name, fn in api_providers.items():
+                task_map[name] = asyncio.create_task(_run_provider(name, fn, q, barcode, limit, ctx=None))
+            try:
+                await asyncio.gather(*task_map.values())
+            except Exception:
+                pass
+
+    # Construir resultados por tienda sin perder correspondencia
+    results_per_store: Dict[str, List[Dict]] = {}
+    for name in active_providers.keys():
+        task = task_map.get(name)
+        if task and task.done() and not task.cancelled():
+            try:
+                results_per_store[name] = task.result() or []
+            except Exception:
+                results_per_store[name] = []
+        else:
+            # No hubo task (p.ej. falló el ctx de browser) → vacío
+            results_per_store[name] = []
+
+    total_count = sum(len(v) for v in results_per_store.values())
 
     return {
-        "results": results_per_store,
+        "results": results_per_store,            # {carrefour: [...], coto: [...], ...}
         "count": total_count,
-        "enabled": list(active_providers.keys()),
+        "enabled": list(active_providers.keys()),# preserva orden de PROVIDERS filtrado
     }
