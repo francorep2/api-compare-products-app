@@ -5,7 +5,7 @@ import logging
 import inspect
 
 # ===== Importar cada provider con alias (evita sobrescribir 'search') =====
-from app.services import coto as coto_svc
+from app.services.coto import coto_search as coto_svc
 from app.services import carrefour as carrefour_svc
 from app.services import dia as dia_svc
 from app.services import jumbo as jumbo_svc
