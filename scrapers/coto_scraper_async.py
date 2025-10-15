@@ -11,6 +11,11 @@ COTO_BASE = "https://www.cotodigital.com.ar"
 COTO_STATIC_HOST = "https://static.cotodigital3.com.ar"
 COTO_SUCURSAL_ID = 200
 
+CONCURRENCY_LIMIT = 8
+DEFAULT_TIMEOUT_MS = 10000          # timeout base para navegaciones rápidas
+DEFAULT_SEARCH_TIMEOUT_MS = 8000    # navegación de página de resultados
+PDP_TIMEOUT_MS = 6000               # límite más amplio por PDP (evita nulls)
+
 # ===================== Texto / matching =====================
 
 def _norm_text(s: str) -> str:
@@ -78,6 +83,33 @@ def absolutize(base: str, href: str, current_url: Optional[str] = None) -> str:
     parts = base.split("/", 3)
     path = href if href.startswith("/") else ("/"+href)
     return f"{parts[0]}//{parts[2]}{path}"
+
+# Bloqueo de recursos pesados para acelerar cargas
+async def _enable_speed_routes(page):
+    async def _route_handler(route):
+        try:
+            if route.request.resource_type in {"image", "font", "media"}:
+                return await route.abort()
+        except Exception:
+            pass
+        await route.continue_()
+    await page.route("**/*", _route_handler)
+
+
+# Navegación robusta con reintentos
+async def _goto_with_retries(page, url: str, wait_until: str = "domcontentloaded", timeout: int = DEFAULT_TIMEOUT_MS, attempts: int = 2):
+    last_err = None
+    for i in range(attempts):
+        try:
+            return await page.goto(url, wait_until=wait_until, timeout=timeout)
+        except Exception as e:
+            last_err = e
+            # pequeño backoff progresivo
+            try:
+                await asyncio.sleep(0.25 * (i + 1))
+            except Exception:
+                pass
+    raise last_err if last_err else RuntimeError("goto failed without exception")
 
 def _digits(s: Optional[str]) -> str:
     return re.sub(r"\D", "", s or "")
@@ -303,6 +335,10 @@ async def parse_jsonld_product(page):
     return None
 
 async def parse_meta_price_dom(page) -> Optional[str]:
+    try:
+        await asyncio.wait_for(page.wait_for_selector("meta[itemprop='price'], meta[property='product:price:amount']", timeout=300), timeout=0.35)
+    except Exception:
+        pass
     for sel in ["meta[itemprop='price']", "meta[property='product:price:amount']"]:
         el = page.locator(sel).first
         if await el.count():
@@ -342,15 +378,21 @@ async def parse_meta_price_dom(page) -> Optional[str]:
 
 async def parse_regex_from_html(page) -> Optional[str]:
     html = await page.content()
-    m = re.findall(r"(?:\$|ARS)\s*[\d\. ]{1,}(?:,\d{2})?", html, flags=re.I)
-    best = None
-    for s in m:
+    matches = re.findall(r"(?:\$|ARS)\s*[\d\. ]{1,}(?:,\d{2})?", html, flags=re.I)
+    best_val = None
+    best_str = None
+    for s in matches:
         pr = normalize_price(s)
-        if pr:
-            val = float(pr.replace("ARS","").replace("$","").strip())
-            if not best or val > best[0]:
-                best = (val, pr)
-    return best[1] if best else None
+        if not pr:
+            continue
+        try:
+            val = float(pr.replace("ARS", "").replace("$", "").strip())
+        except Exception:
+            continue
+        if best_val is None or val > best_val:
+            best_val = val
+            best_str = pr
+    return best_str
 
 # ===================== Imagen estática Coto =====================
 
@@ -474,17 +516,23 @@ def sanitize_coto_href(href:str) -> str:
     new_query = urllib.parse.urlencode(pairs, doseq=True)
     return f"{base}?{new_query}"
 
-async def fetch_coto_pdp(ctx, href, timeout=60000) -> Dict:
+async def fetch_coto_pdp(ctx, href, timeout=DEFAULT_TIMEOUT_MS) -> Dict:
     page = await ctx.new_page()
     try:
         url = absolutize(COTO_BASE, href)
         url = sanitize_coto_href(url)
         print(f"[LOG] PDP GET {url}")
-        await page.goto(url, wait_until="networkidle", timeout=timeout)
-
-        for _ in range(2):
-            await page.mouse.wheel(0, 800)
-            await asyncio.sleep(0.2)
+        # navegación con margen para cargar DOM principal
+        await _goto_with_retries(page, url, wait_until="domcontentloaded", timeout=min(timeout, PDP_TIMEOUT_MS))
+        try:
+            await page.wait_for_load_state("networkidle", timeout=1500)
+        except Exception:
+            pass
+        # asegurar que aparece un título o zona de precio (sin bloquear de más)
+        try:
+            await page.wait_for_selector("h1, h1[itemprop='name'], .product-name, [itemprop='price'], .price, .best-price", timeout=1200)
+        except Exception:
+            pass
 
         # título
         title = None
@@ -506,6 +554,16 @@ async def fetch_coto_pdp(ctx, href, timeout=60000) -> Dict:
         if not price: price = await parse_meta_price_dom(page)
         if not price: price = await parse_regex_from_html(page)
         if not title: title = clean_text(await page.title())
+
+        # (opcional robustez): si aún no hay título, probar og:title
+        if not title:
+            try:
+                ogt = page.locator("meta[property='og:title']").first
+                if await ogt.count():
+                    t = await ogt.get_attribute("content")
+                    title = clean_text(t) if t else title
+            except Exception:
+                pass
 
         # imagen
         image_url = await extract_image_url(page, url)
@@ -546,33 +604,42 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
     )
 
     page = await ctx.new_page()
+    await _enable_speed_routes(page)
     try:
         print(f"[LOG] Coto classic GET {search_url}")
-        resp = await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+        resp = await _goto_with_retries(page, search_url, wait_until="domcontentloaded", timeout=DEFAULT_SEARCH_TIMEOUT_MS)
         print(f"[LOG] Classic status: {resp.status if resp else 'N/A'} | title: {await page.title()}")
 
-        # intentar que cargue todo el grid
+        # esperar anclas de productos con reintentos cortos
+        anchors_selector = "a[href*='/sitios/cdigi/productos/']"
+        got_anchors = False
         try:
-            await page.wait_for_load_state("networkidle", timeout=6000)
-        except:
+            await page.wait_for_selector(anchors_selector, timeout=3500)
+            got_anchors = True
+        except Exception:
             pass
-
-        for _ in range(3):
-            await page.mouse.wheel(0, 1200)
-            await asyncio.sleep(0.25)
+        if not got_anchors:
+            # hacer un par de scrolls y reintentar
+            try:
+                for _ in range(2):
+                    await page.mouse.wheel(0, 1200)
+                    await asyncio.sleep(0.2)
+                await page.wait_for_selector(anchors_selector, timeout=2000)
+                got_anchors = True
+            except Exception:
+                got_anchors = False
 
         # 1) levantar anchors del grid
-        anchors = None
+        anchors = page.locator(anchors_selector)
         try:
-            anchors = page.locator("a[href*='/sitios/cdigi/productos/']")
-            total = await anchors.count()
-        except:
+            total = await anchors.count() if got_anchors else await anchors.count()
+        except Exception:
             total = 0
 
         hrefs_with_cardpromo: List[tuple[str, Optional[str]]] = []
 
         if total:
-            take = min(total, max(24, limit * 8))
+            take = min(total, max(8, limit * 5))
             for i in range(take):
                 a = anchors.nth(i)
                 href = (await a.get_attribute("href")) or ""
@@ -585,35 +652,85 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
                 except:
                     card_promo = None
                 hrefs_with_cardpromo.append((href, card_promo))
+            # normalizar y deduplicar por HREF base antes de ir a PDPs
+            norm_pairs = []
+            seen_href = set()
+            for h, cp in hrefs_with_cardpromo:
+                try:
+                    full = absolutize(COTO_BASE, h)
+                    full = sanitize_coto_href(full)
+                except Exception:
+                    full = h
+                if full in seen_href:
+                    continue
+                seen_href.add(full)
+                norm_pairs.append((full, cp))
+            hrefs_with_cardpromo = norm_pairs
         else:
             # 2) fallback: parsear HTML manualmente (sin promo de card)
             html = await page.content()
             found = re.findall(r'href="([^"]+/sitios/cdigi/productos/[^"]+)"', html, flags=re.I)
             for h in found:
                 hrefs_with_cardpromo.append((h, None))
+            # normalizar y deduplicar por HREF base antes de ir a PDPs
+            norm_pairs = []
+            seen_href = set()
+            for h, cp in hrefs_with_cardpromo:
+                try:
+                    full = absolutize(COTO_BASE, h)
+                    full = sanitize_coto_href(full)
+                except Exception:
+                    full = h
+                if full in seen_href:
+                    continue
+                seen_href.add(full)
+                norm_pairs.append((full, cp))
+            hrefs_with_cardpromo = norm_pairs
 
         if not hrefs_with_cardpromo:
             await save_debug_html(page, "coto_classic_empty")
+            await save_debug_html(page, "coto_classic_empty_after_wait")
             return []
 
-        # 3) visitar PDPs y armar resultados
+        # 3) visitar PDPs concurrentemente (con límite) y armar resultados
         results: List[Dict] = []
         seen: set[str] = set()
+        sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
-        for href, card_promo in hrefs_with_cardpromo:
-            pdp = await fetch_coto_pdp(ctx, href)
-            final_url = pdp.get("url") or sanitize_coto_href(absolutize(COTO_BASE, href))
-            if not final_url or final_url in seen:
-                continue
+        tasks = []
+        for h, cp in hrefs_with_cardpromo:
+            async def _job(href=h, card_promo=cp):
+                try:
+                    pdp = await asyncio.wait_for(
+                        fetch_coto_pdp(ctx, href, timeout=PDP_TIMEOUT_MS),
+                        timeout=(PDP_TIMEOUT_MS/1000.0) + 0.5,
+                    )
+                except Exception:
+                    # fallback mínimo con lo que tenemos si la PDP no responde a tiempo
+                    pdp = {"title": None, "price": None, "url": href, "image_url": None, "barcode": None, "promotion": card_promo}
+                if pdp.get("promotion") is None and card_promo:
+                    pdp["promotion"] = card_promo
+                return pdp
+            tasks.append(asyncio.create_task(_job()))
 
-            # si la PDP no trajo promo, usar la de la card
-            if pdp.get("promotion") is None and card_promo:
-                pdp["promotion"] = card_promo
-
-            seen.add(final_url)
-            results.append(pdp)
+        try:
+            for coro in asyncio.as_completed(tasks):
+                pdp = await coro
+                final_url = pdp.get("url") or None
+                if not final_url:
+                    continue
+                if final_url in seen:
+                    continue
+                seen.add(final_url)
+                results.append(pdp)
+                if len(results) >= limit:
+                    break
+        finally:
             if len(results) >= limit:
-                break
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         if not results:
             await save_debug_html(page, "coto_classic_no_matches")
@@ -634,7 +751,7 @@ async def coto_search_by_barcode(ctx, ean: str, limit: int = TOP_N) -> List[Dict
     out = []
     for item in prelim:
         bc = item.get("barcode")
-        if bc and bc == ean:
+        if bc and str(bc) == ean:
             out.append(item)
         if len(out) == limit:
             break
