@@ -12,19 +12,18 @@ from app.services import jumbo as jumbo_svc
 
 log = logging.getLogger(__name__)
 
-# Marcar los que usan navegador/pesados
-HEAVY_PROVIDERS = {"carrefour", "dia", "jumbo", "coto"}  # ajustá si hace falta
+HEAVY_PROVIDERS = {"carrefour", "dia", "jumbo", "coto"} 
 
 # Mapa de providers -> función
 PROVIDERS: Dict[str, Callable[..., List[Dict[str, Any]]]] = {
     "carrefour": carrefour_svc.search,
-    "coto": coto_svc.search_coto,        # <- Coto expone search_coto(ctx=..., q=..., ...)
+    "coto": coto_svc.search_coto,        #
     "jumbo": jumbo_svc.search,
     "dia": dia_svc.search,
 }
 
-PER_PROVIDER_TIMEOUT = 15   # segundos máx por tienda
-OVERALL_TIMEOUT = 40        # máx para toda la búsqueda
+PER_PROVIDER_TIMEOUT = 25   
+OVERALL_TIMEOUT = 40        
 
 
 async def _invoke_provider(
