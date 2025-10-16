@@ -1,6 +1,6 @@
 # scrapers_async/coto_scraper_async.py
-from typing import List, Dict, Optional
-import json, urllib.parse, re, time, datetime, os, asyncio, unicodedata
+from typing import List, Dict, Optional, Any
+import json, urllib.parse, re, time, datetime, os, asyncio, unicodedata, contextlib
 
 from scrapers._utils_promos import PROMO_NORMALIZER
 
@@ -11,10 +11,11 @@ COTO_BASE = "https://www.cotodigital.com.ar"
 COTO_STATIC_HOST = "https://static.cotodigital3.com.ar"
 COTO_SUCURSAL_ID = 200
 
-CONCURRENCY_LIMIT = 8
-DEFAULT_TIMEOUT_MS = 10000          # timeout base para navegaciones rápidas (Playwright usa ms)
-DEFAULT_SEARCH_TIMEOUT_MS = 8000    # navegación de página de resultados
-PDP_TIMEOUT_MS = 6000               # límite por PDP (ms) — con retry/gather
+# Ajustes endurecidos
+CONCURRENCY_LIMIT = 4                 # bajar concurrencia para evitar throttling
+DEFAULT_TIMEOUT_MS = 15000            # + tiempo para montado React
+DEFAULT_SEARCH_TIMEOUT_MS = 12000
+PDP_TIMEOUT_MS = 12000
 
 # ===================== Texto / matching =====================
 
@@ -96,7 +97,8 @@ async def _enable_speed_routes(page):
     await page.route("**/*", _route_handler)
 
 # Navegación robusta con reintentos
-async def _goto_with_retries(page, url: str, wait_until: str = "domcontentloaded", timeout: int = DEFAULT_TIMEOUT_MS, attempts: int = 2):
+async def _goto_with_retries(page, url: str, wait_until: str = "domcontentloaded",
+                             timeout: int = DEFAULT_TIMEOUT_MS, attempts: int = 3):
     last_err = None
     for i in range(attempts):
         try:
@@ -104,7 +106,7 @@ async def _goto_with_retries(page, url: str, wait_until: str = "domcontentloaded
         except Exception as e:
             last_err = e
             try:
-                await asyncio.sleep(0.25 * (i + 1))
+                await asyncio.sleep(0.4 * (i + 1))
             except Exception:
                 pass
     raise last_err if last_err else RuntimeError("goto failed without exception")
@@ -172,6 +174,8 @@ GRID_BADGE_SELECTORS = [
     "[class*='discount']",
     "[data-testid*='discount']",
     "[data-testid*='badge']",
+    "[data-testid*='price-badge']",
+    "[data-testid*='promo']",
     ".badge", ".flags", ".tag", ".promo", ".promotion", ".product-flag",
     "span:has-text('OFERTA')", "span:has-text('Dto')", "strong:has-text('OFERTA')"
 ]
@@ -194,7 +198,8 @@ async def extract_promotion_from_dom_page(page) -> Optional[str]:
         ".descuento", ".beneficio", ".ahorro", ".etiqueta", ".label",
         ".tag", ".tag-oferta", ".tag-descuento", ".product__badge",
         ".prod__promo", ".prod__flag", ".product-promotion",
-        "span:has-text('OFERTA')", "strong:has-text('OFERTA')", "span:has-text('Dto')"
+        "span:has-text('OFERTA')", "strong:has-text('OFERTA')", "span:has-text('Dto')",
+        "[data-testid*='badge']", "[data-testid*='promo']", "[data-testid*='price-badge']"
     ]
     def _try_pick(txts: list[str]) -> Optional[str]:
         txt = " | ".join(t for t in txts if t)
@@ -265,35 +270,84 @@ async def extract_promotion_from_card(card_locator) -> Optional[str]:
 async def parse_jsonld_product(page):
     scripts = page.locator("script[type='application/ld+json']")
     count = await scripts.count()
+
+    def _walk(obj):
+        stack = [obj]
+        while stack:
+            it = stack.pop()
+            if isinstance(it, dict):
+                yield it
+                for v in it.values():
+                    stack.append(v)
+            elif isinstance(it, list):
+                for v in it:
+                    stack.append(v)
+
+    def _coerce_price(v):
+        if v is None: return None
+        s = str(v).strip().replace(".", "").replace(",", ".")  # "2.653,33" -> "2653.33"
+        try:
+            return float(s)
+        except:
+            return None
+
     for i in range(count):
         try:
             raw = (await scripts.nth(i).inner_text()).strip()
             data = json.loads(raw)
-            items = data if isinstance(data, list) else [data]
-            for it in items:
-                if isinstance(it, dict) and ("Product" in str(it.get("@type"))):
-                    name = it.get("name")
-                    offers = it.get("offers")
-                    price = None
-                    if isinstance(offers, list) and offers:
-                        offers = offers[0]
-                    if isinstance(offers, dict):
-                        p = offers.get("price")
-                        if p:
-                            try: price = float(str(p).replace(",", "."))
-                            except: price = None
-                    image = it.get("image")
-                    if isinstance(image, list) and image:
-                        image = image[0]
-                    gtin = choose_barcode(it.get("gtin13"), it.get("gtin14"), it.get("gtin"), it.get("sku"))
-                    return {
-                        "title": clean_text(name) if name else None,
-                        "price": f"ARS {price:.2f}" if price is not None else None,
-                        "image": image or None,
-                        "barcode": gtin or None,
-                    }
         except:
-            pass
+            continue
+
+        # Puede venir en @graph, lista o dict suelto
+        candidates: List[Any] = []
+        if isinstance(data, dict) and "@graph" in data:
+            candidates = data["@graph"]
+        elif isinstance(data, list):
+            candidates = data
+        else:
+            candidates = [data]
+
+        for node in _walk(candidates):
+            t = node.get("@type")
+            if isinstance(t, list):
+                is_product = any("Product" in str(x) for x in t)
+            else:
+                is_product = "Product" in str(t)
+
+            if not is_product:
+                continue
+
+            name = node.get("name") or node.get("headline")
+            image = node.get("image")
+            if isinstance(image, list) and image:
+                image = image[0]
+
+            # offers puede ser dict o lista
+            offers = node.get("offers")
+            if isinstance(offers, list):
+                offers = offers[0] if offers else {}
+
+            price = None
+            if isinstance(offers, dict):
+                price = _coerce_price(
+                    offers.get("price") or
+                    (offers.get("priceSpecification") or {}).get("price")
+                )
+
+            gtin = choose_barcode(
+                node.get("gtin13"),
+                node.get("gtin14"),
+                node.get("gtin"),
+                node.get("sku")
+            )
+
+            return {
+                "title": clean_text(name) if name else None,
+                "price": f"ARS {price:.2f}" if price is not None else None,
+                "image": image or None,
+                "barcode": gtin or None,
+            }
+
     return None
 
 async def parse_meta_price_dom(page) -> Optional[str]:
@@ -306,20 +360,14 @@ async def parse_meta_price_dom(page) -> Optional[str]:
         if await el.count():
             val = await el.get_attribute("content")
             if val:
-                try: return f"ARS {float(str(val).replace(',','.')):.2f}"
+                try: return f"ARS {float(str(val).replace('.','').replace(',','.')):.2f}"
                 except: pass
-    for cont_sel in ["#skuBestPrice", ".skuBestPrice", ".best-price", ".bestPrice", ".price", ".new-price"]:
+    for cont_sel in ["#skuBestPrice", ".skuBestPrice", ".best-price", ".bestPrice", ".price", ".new-price", "[data-price]", "[data-testid*='price']"]:
         cont = page.locator(cont_sel).first
         if not await cont.count():
             continue
-        val_el = cont.locator(".val").first
-        dec_el = cont.locator(".dec").first
-        if await val_el.count():
-            entero = (await val_el.inner_text() or "").strip()
-            dec = (await dec_el.inner_text() or "").strip() if await dec_el.count() else "00"
-            pr = normalize_price(f"$ {entero},{dec}")
-            if pr: return pr
-        pr = normalize_price(clean_text(await cont.inner_text()))
+        val = clean_text(await cont.inner_text())
+        pr = normalize_price(val)
         if pr: return pr
     for sel in ["span:has-text('$')", "div:has-text('$')"]:
         el = page.locator(sel).first
@@ -392,24 +440,31 @@ async def extract_image_url(page, final_url) -> Optional[str]:
         jl = await parse_jsonld_product(page)
         if jl and jl.get("image"):
             return absolutize(COTO_BASE, jl["image"])
-    except: pass
+    except: 
+        pass
+
+    # Relaja filtro por dominio y admite data-*
     for sel in ["meta[property='og:image']", "meta[name='twitter:image']", "meta[property='og:image:url']"]:
         el = page.locator(sel).first
         if await el.count():
             src = await el.get_attribute("content")
-            if src and "cotodigital" in src:
+            if src:
                 return absolutize(COTO_BASE, src)
+
     el = page.locator("link[rel='image_src']").first
     if await el.count():
         src = await el.get_attribute("href")
-        if src and "cotodigital" in src:
+        if src:
             return absolutize(COTO_BASE, src)
+
     for sel in ["img[itemprop='image']", ".product-image img", ".image-gallery img", "img"]:
         el = page.locator(sel).first
         if await el.count():
-            for attr in ["src", "data-src", "data-lazy", "data-original"]:
+            for attr in ["src", "data-src", "data-lazy", "data-original", "data-srcset"]:
                 src = await el.get_attribute(attr)
-                if src and "cotodigital" in src:
+                if src:
+                    # si es srcset, quedate con el primer URL
+                    src = src.split()[0]
                     return absolutize(COTO_BASE, src)
     return None
 
@@ -426,12 +481,15 @@ async def extract_barcode_from_datalayer_or_html(page) -> Optional[str]:
                         val = it.get(k)
                         d = normalize_barcode(val if val is not None else None)
                         if d: return d
-    except: pass
+    except: 
+        pass
     try:
         html = await page.content()
         for raw in re.findall(r'<script[^>]+ld\+json[^>]*>(.*?)</script>', html, flags=re.S|re.I):
-            try: data = json.loads(raw)
-            except: continue
+            with contextlib.suppress(Exception):
+                data = json.loads(raw)
+            if not data: 
+                continue
             stack = [data]
             while stack:
                 it = stack.pop()
@@ -443,7 +501,8 @@ async def extract_barcode_from_datalayer_or_html(page) -> Optional[str]:
                     stack.extend(it.values())
                 elif isinstance(it, list):
                     stack.extend(it)
-    except: pass
+    except: 
+        pass
     try:
         txt = await page.content()
         nums = re.findall(r'\b(\d{8,14})\b', txt)
@@ -452,7 +511,8 @@ async def extract_barcode_from_datalayer_or_html(page) -> Optional[str]:
                 if len(n) == pref:
                     d = normalize_barcode(n)
                     if d: return d
-    except: pass
+    except: 
+        pass
     return None
 
 # ===================== PDP/Search =====================
@@ -478,7 +538,6 @@ def sanitize_coto_href(href:str) -> str:
     new_query = urllib.parse.urlencode(pairs, doseq=True)
     return f"{base}?{new_query}"
 
-
 async def fetch_coto_pdp(ctx, href, timeout=PDP_TIMEOUT_MS) -> Dict:
     page = await ctx.new_page()
     await _enable_speed_routes(page)
@@ -487,60 +546,101 @@ async def fetch_coto_pdp(ctx, href, timeout=PDP_TIMEOUT_MS) -> Dict:
         url = sanitize_coto_href(url)
         print(f"[LOG] PDP GET {url}")
 
-        # ⚙️ Espera más tolerante (Coto tarda en montar React)
+        # Navegación y pequeña ventana para montado React
         await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-        await asyncio.sleep(1.8)
-
-        # Intento adicional: si el body sigue vacío, hace scroll y espera otra vez
-        body_txt = (await page.inner_text("body"))[:2000]
-        if "Cargando" in body_txt or len(body_txt.strip()) < 200:
+        for _ in range(3):
+            await asyncio.sleep(0.9)
+            body_txt = (await page.inner_text("body"))[:2000]
+            if len(body_txt.strip()) >= 200 and "Cargando" not in body_txt:
+                break
             await page.mouse.wheel(0, 1000)
-            await asyncio.sleep(1.5)
 
         # === Título ===
         title = None
-        for sel in [
+        TITLE_SELECTORS = [
+            "[data-testid='product-title']",
             "h1.product__title",
             "h1.product-name",
             "h1",
-            "[data-testid='product-title']",
             "[class*='product'] h1",
-        ]:
-            el = page.locator(sel).first
-            if await el.count():
-                t = clean_text(await el.inner_text())
-                if t:
-                    title = t
-                    break
+            "meta[property='og:title']::attr(content)"
+        ]
+        for sel in TITLE_SELECTORS:
+            if "::attr(" in sel:
+                # leer atributo via evaluate
+                try:
+                    val = await page.evaluate("""sel => {
+                        const [s,attr] = sel.split("::attr(");
+                        const a = attr.replace(")","");
+                        const el = document.querySelector(s);
+                        return el ? el.getAttribute(a) : null;
+                    }""", sel)
+                    if val:
+                        title = clean_text(val)
+                        break
+                except:
+                    pass
+            else:
+                el = page.locator(sel).first
+                if await el.count():
+                    t = clean_text(await el.inner_text())
+                    if t:
+                        title = t
+                        break
 
         # === Precio ===
         price = None
-        # Primero intenta JSON-LD
         jl = await parse_jsonld_product(page)
         if jl:
             price = jl.get("price") or price
             if jl.get("title") and not title:
                 title = jl["title"]
 
-        # Si aún no tiene precio, busca en DOM
         if not price:
-            for sel in [
+            PRICE_SELECTORS = [
+                "[data-price]",
+                "[data-testid*='price']",
                 ".price__value",
                 ".price__number",
                 ".product-price",
                 "span.price",
                 "div.price",
                 "span[class*='precio']",
-            ]:
-                el = page.locator(sel).first
-                if await el.count():
-                    val = clean_text(await el.inner_text())
-                    val = normalize_price(val)
-                    if val:
-                        price = val
-                        break
+                "meta[itemprop='price']::attr(content)",
+                "meta[property='product:price:amount']::attr(content)"
+            ]
+            for sel in PRICE_SELECTORS:
+                if "::attr(" in sel:
+                    try:
+                        val = await page.evaluate("""sel => {
+                            const [s,attr] = sel.split("::attr(");
+                            const a = attr.replace(")","");
+                            const el = document.querySelector(s);
+                            return el ? el.getAttribute(a) : null;
+                        }""", sel)
+                        if val:
+                            try:
+                                f = float(str(val).replace(".", "").replace(",", "."))
+                                price = f"ARS {f:.2f}"
+                                break
+                            except:
+                                pr = normalize_price(val)
+                                if pr:
+                                    price = pr
+                                    break
+                    except:
+                        pass
+                else:
+                    el = page.locator(sel).first
+                    if await el.count():
+                        val = clean_text(await el.inner_text())
+                        pr = normalize_price(val)
+                        if pr:
+                            price = pr
+                            break
 
-        # Fallback regex si aún no lo tiene
+        if not price:
+            price = await parse_meta_price_dom(page)
         if not price:
             price = await parse_regex_from_html(page)
         if not title:
@@ -581,7 +681,6 @@ async def fetch_coto_pdp(ctx, href, timeout=PDP_TIMEOUT_MS) -> Dict:
         }
     finally:
         await page.close()
-
 
 async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
     """
@@ -674,7 +773,7 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
                 try:
                     pdp = await asyncio.wait_for(
                         fetch_coto_pdp(ctx, href, timeout=PDP_TIMEOUT_MS),
-                        timeout=(PDP_TIMEOUT_MS/1000.0) + 2.0,  # colchón para Python timeout (seg)
+                        timeout=(PDP_TIMEOUT_MS/1000.0) + 2.0,
                     )
                 except Exception:
                     pdp = {"title": None, "price": None, "url": href, "image_url": None, "barcode": None, "promotion": card_promo}
