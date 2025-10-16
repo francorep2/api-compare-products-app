@@ -14,8 +14,8 @@ COTO_SUCURSAL_ID = 200
 # Ajustes endurecidos
 CONCURRENCY_LIMIT = 4                 # bajar concurrencia para evitar throttling
 DEFAULT_TIMEOUT_MS = 15000            # + tiempo para montado React
-DEFAULT_SEARCH_TIMEOUT_MS = 12000
-PDP_TIMEOUT_MS = 12000
+DEFAULT_SEARCH_TIMEOUT_MS = 18000
+PDP_TIMEOUT_MS = 15000
 
 # ===================== Texto / matching =====================
 
@@ -773,7 +773,7 @@ async def coto_search_top_n(ctx, query: str, limit: int = TOP_N) -> List[Dict]:
                 try:
                     pdp = await asyncio.wait_for(
                         fetch_coto_pdp(ctx, href, timeout=PDP_TIMEOUT_MS),
-                        timeout=(PDP_TIMEOUT_MS/1000.0) + 2.0,
+                        timeout=(PDP_TIMEOUT_MS/1000.0) + 8.0,
                     )
                 except Exception:
                     pdp = {"title": None, "price": None, "url": href, "image_url": None, "barcode": None, "promotion": card_promo}
