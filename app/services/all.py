@@ -21,8 +21,8 @@ PROVIDERS: Dict[str, Callable] = {
     "dia": search_dia,
 }
 
-PER_PROVIDER_TIMEOUT = 25   # segundos
-OVERALL_TIMEOUT = 45        # segundos (timeout global de la búsqueda)
+PER_PROVIDER_TIMEOUT = 50   # segundos
+OVERALL_TIMEOUT = 55        # segundos (timeout global de la búsqueda)
 
 async def _run_provider(
     name: str,
