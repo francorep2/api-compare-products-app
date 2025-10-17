@@ -13,7 +13,7 @@ COTO_SUCURSAL_ID = 200
 
 CONCURRENCY_LIMIT = 2
 DEFAULT_TIMEOUT_MS = 7000
-DEFAULT_SEARCH_TIMEOUT_MS = 6000
+DEFAULT_SEARCH_TIMEOUT_MS = 2500
 PDP_TIMEOUT_MS = 8000
 
 SCRAPER_BUDGET_SEC = 9.0   # <-- ESTE ES EL TIMEOUT GLOBAL
@@ -748,7 +748,7 @@ async def coto_search_top_n(query: str, limit: int = TOP_N, fast: bool = FAST_MO
         await _enable_speed_routes(page)
         try:
             # Timeout de búsqueda agresivo
-            await _goto_with_retries(page, search_url, wait_until="domcontentloaded", timeout=3000)
+            await _goto_with_retries(page, search_url, wait_until="domcontentloaded", timeout=DEFAULT_SEARCH_TIMEOUT_MS)
             triplets = await _extract_card_pairs(page)   # [(href, card_promo, card_title)]
         except Exception as e:
             print("[LOG] Classic search error:", e)
