@@ -38,4 +38,5 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=20s CMD curl -fsS http://
 # ==== Arranque ====
 # tini evita procesos zombis; uvicorn lanza la API
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+ENV PYTHONPATH=/app
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
