@@ -12,13 +12,13 @@ COTO_BASE = "https://www.cotodigital.com.ar"
 COTO_STATIC_HOST = "https://static.cotodigital3.com.ar"
 COTO_SUCURSAL_ID = 200
 
-# Ajustes endurecidos + presupuesto interno
 CONCURRENCY_LIMIT = 2
-DEFAULT_TIMEOUT_MS = 12000
-DEFAULT_SEARCH_TIMEOUT_MS = 10000
-PDP_TIMEOUT_MS = 10000
+DEFAULT_TIMEOUT_MS = 7000
+DEFAULT_SEARCH_TIMEOUT_MS = 6000
+PDP_TIMEOUT_MS = 8000
 
-SCRAPER_BUDGET_SEC = 20.0  # deja ~5s al endpoint (wait_for=25s)
+SCRAPER_BUDGET_SEC = 9.0   # deja ~3s al endpoint de 12s
+FAST_MODE_DEFAULT = True   # ← clave: sin PDP por defecto
 
 # ===================== Texto / matching =====================
 
@@ -736,12 +736,7 @@ async def _extract_card_pairs(page):
     return pairs
 
 # ===================== Búsqueda =====================
-
-async def coto_search_top_n(query: str, limit: int = TOP_N) -> List[Dict]:
-    """
-    Busca en Coto y devuelve top-N items, con presupuesto interno.
-    Si el tiempo se agota, devuelve resultados de card (sin PDP) para evitar 504.
-    """
+async def coto_search_top_n(query: str, limit: int = TOP_N, fast: bool = FAST_MODE_DEFAULT) -> List[Dict]:
     import time as _t
     deadline = _t.monotonic() + SCRAPER_BUDGET_SEC
 
@@ -750,139 +745,64 @@ async def coto_search_top_n(query: str, limit: int = TOP_N) -> List[Dict]:
         f"?_dyncharset=utf-8&Dy=1&Ntt={urllib.parse.quote(query)}&idSucursal={COTO_SUCURSAL_ID}"
     )
 
-    # 1) abrir búsqueda y extraer hrefs + card promo + card title
     async with browser_manager_async.page() as page:
         await _enable_speed_routes(page)
         try:
             await _goto_with_retries(page, search_url, wait_until="domcontentloaded", timeout=DEFAULT_SEARCH_TIMEOUT_MS)
-            href_triplets = await _extract_card_pairs(page)  # [(href, card_promo, card_title)]
+            triplets = await _extract_card_pairs(page)  # [(href, card_promo, card_title)]
         except Exception as e:
             print("[LOG] Classic search error:", e)
             await save_debug_html(page, "coto_classic_error")
-            href_triplets = []
+            triplets = []
 
-    if not href_triplets:
+    if not triplets:
         return []
 
     # Normalizar y deduplicar
-    norm_pairs = []
-    seen_href = set()
-    for h, cp, ct in href_triplets[: max(limit * 5, 10)]:  # cap early
+    norm: list[tuple[str, Optional[str], Optional[str]]] = []
+    seen = set()
+    for h, cp, ct in triplets[: max(limit * 4, 12)]:
         try:
-            full = absolutize(COTO_BASE, h)
-            full = sanitize_coto_href(full)
+            full = sanitize_coto_href(absolutize(COTO_BASE, h))
         except Exception:
             full = h
-        if full in seen_href:
+        if full in seen:
             continue
-        seen_href.add(full)
-        norm_pairs.append((full, cp, ct))
+        seen.add(full)
+        norm.append((full, cp, ct))
 
-    # 2) Si ya tenemos suficientes con título de card, devolvé rápido (sin PDP)
-    quick: List[Dict] = []
-    for url, card_promo, card_title in norm_pairs:
-        if card_title:
-            quick.append({
-                "title": clean_text(card_title),
-                "price": None,
-                "url": url,
-                "image_url": None,
-                "barcode": None,
-                "promotion": _pick_best_promo_text(card_promo or "") if card_promo else None,
-            })
-            if len(quick) >= limit:
-                return quick[:limit]
+    # FAST: devolver solo lo que hay en la card (SIN PDP)
+    out: List[Dict] = []
+    for url, card_promo, card_title in norm:
+        out.append({
+            "title": clean_text(card_title) if card_title else None,
+            "price": None,
+            "url": url,
+            "image_url": None,
+            "barcode": None,
+            "promotion": _pick_best_promo_text(card_promo or "") if card_promo else None,
+        })
+        if len(out) >= limit:
+            break
 
-    # 3) Si queda poco tiempo, devolvé aunque sea URL + promo
-    if _time_left(deadline) < 5.0:
-        fallback = []
-        for url, card_promo, card_title in norm_pairs[:limit]:
-            fallback.append({
-                "title": clean_text(card_title) if card_title else None,
-                "price": None,
-                "url": url,
-                "image_url": None,
-                "barcode": None,
-                "promotion": _pick_best_promo_text(card_promo or "") if card_promo else None,
-            })
-        return fallback
-
-    # 4) Fan-out a PDP (acotado) solo si tenemos tiempo
-    candidates = norm_pairs[: max(limit * 3, 6)]
-    results: List[Dict] = []
-    seen: set[str] = set()
-    sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
-
-    async def _job(url: str, card_promo: Optional[str], card_title: Optional[str]):
-        # Si el tiempo se agota, evitá PDP
-        if _time_left(deadline) < 4.0:
-            return {
-                "title": clean_text(card_title) if card_title else None,
-                "price": None,
-                "url": url,
-                "image_url": None,
-                "barcode": None,
-                "promotion": _pick_best_promo_text(card_promo or "") if card_promo else None,
-            }
-        async with sem:
-            try:
-                pdp = await asyncio.wait_for(
-                    fetch_coto_pdp(url, timeout=PDP_TIMEOUT_MS),
-                    timeout=(PDP_TIMEOUT_MS/1000.0) + 2.0,
-                )
-            except Exception:
-                pdp = {"title": clean_text(card_title) if card_title else None,
-                       "price": None, "url": url, "image_url": None,
-                       "barcode": None, "promotion": None}
-            if not pdp.get("promotion") and card_promo:
-                pdp["promotion"] = _pick_best_promo_text(card_promo) or card_promo
-            if not pdp.get("title") and card_title:
-                pdp["title"] = clean_text(card_title)
-            return pdp
-
-    tasks = [asyncio.create_task(_job(u, cp, ct)) for (u, cp, ct) in candidates]
-
-    try:
-        for coro in asyncio.as_completed(tasks):
-            pdp = await coro
-            final_url = pdp.get("url") or None
-            if not final_url:
+    # Safety: si por algún motivo quedó corto, completa con URLs
+    if len(out) < limit:
+        for url, cp, ct in norm:
+            if any(x["url"] == url for x in out):
                 continue
-            if final_url in seen:
-                continue
-            seen.add(final_url)
-            results.append(pdp)
-            if len(results) >= limit:
-                break
-    finally:
-        # cancelar pendientes si ya cumplimos el límite
-        if len(results) >= limit:
-            for t in tasks:
-                if not t.done():
-                    t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    # 5) Si no llegamos a limit y aún queda tiempo, rellená con quick/fallback
-    if len(results) < limit:
-        pool = quick or [
-            {
+            out.append({
                 "title": clean_text(ct) if ct else None,
                 "price": None,
-                "url": u,
+                "url": url,
                 "image_url": None,
                 "barcode": None,
                 "promotion": _pick_best_promo_text(cp or "") if cp else None,
-            }
-            for (u, cp, ct) in norm_pairs
-        ]
-        for it in pool:
-            if it["url"] in {r["url"] for r in results}:
-                continue
-            results.append(it)
-            if len(results) >= limit:
+            })
+            if len(out) >= limit:
                 break
 
-    return results[:limit]
+    return out[:limit]
+
 
 # ===================== Búsqueda por barcode =====================
 
@@ -897,15 +817,14 @@ async def coto_search_by_barcode(ean: str, limit: int = TOP_N) -> List[Dict]:
             break
     return out or prelim[:limit]
 
-# ===================== API pública del scraper =====================
-
 async def search_top_n(query: str, limit: int = TOP_N) -> List[Dict]:
-    return await coto_search_top_n(query, limit=limit)
+    return await coto_search_top_n(query, limit=limit, fast=True)
 
 async def search(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = TOP_N) -> List[Dict]:
     ean = normalize_barcode(barcode or (q or ""))
     if ean and (not q or q.strip() == ean):
-        return await coto_search_by_barcode(ean, limit=limit)
+        # Búsqueda por EAN (rápida)
+        return await coto_search_top_n(ean, limit=limit, fast=True)
     if q and q.strip():
-        return await coto_search_top_n(q.strip(), limit=limit)
+        return await coto_search_top_n(q.strip(), limit=limit, fast=True)
     return []
