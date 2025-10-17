@@ -22,11 +22,6 @@ from app.core.browser_async import browser_manager_async
 
 router = APIRouter(prefix="/search", tags=["search"],dependencies=[Depends(get_current_user)],)
 
-async def get_ctx() -> BrowserContext:
-    async with browser_manager_async.new_context() as ctx:
-        yield ctx 
-        
-
 VALID_STORES = {"coto","carrefour","dia","jumbo"}
 
 
@@ -57,9 +52,8 @@ async def search_coto_endpoint(
     q: str | None = Query(None),
     barcode: str | None = Query(None),
     limit: int = Query(3, ge=1, le=10),
-    ctx: BrowserContext = Depends(get_ctx), 
 ):
-    items = await search_coto(ctx=ctx, q=q, barcode=barcode, limit=limit)
+    items = await search_coto(q=q, barcode=barcode, limit=limit)
     return {"results": items}
 
 @router.get("/carrefour")
@@ -98,7 +92,5 @@ async def search_all_endpoint(
     limit: int = Query(3, ge=1, le=10),
     enabled: Optional[List[str]] = Query(None, description="Filtrar tiendas: carrefour,coto,jumbo,dia"),
 ):
-    """
-    Agregador: busca por nombre o barcode en múltiples tiendas.
-    """
+
     return await search_all_grouped(q=q, barcode=barcode, limit=limit, enabled=enabled)
