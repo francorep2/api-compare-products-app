@@ -13,8 +13,8 @@ COTO_STATIC_HOST = "https://static.cotodigital3.com.ar"
 COTO_SUCURSAL_ID = 200
 
 CONCURRENCY_LIMIT = 2
-DEFAULT_TIMEOUT_MS = 7000
-DEFAULT_SEARCH_TIMEOUT_MS = 6000
+DEFAULT_TIMEOUT_MS = 6000         
+DEFAULT_SEARCH_TIMEOUT_MS = 4000  
 PDP_TIMEOUT_MS = 8000
 
 SCRAPER_BUDGET_SEC = 9.0   # deja ~3s al endpoint de 12s
@@ -105,8 +105,7 @@ async def _enable_speed_routes(page):
     )
 
 # Navegación robusta con reintentos
-async def _goto_with_retries(page, url: str, wait_until: str = "domcontentloaded",
-                             timeout: int = DEFAULT_TIMEOUT_MS, attempts: int = 2):
+async def _goto_with_retries(page, url: str, wait_until: str = "domcontentloaded",timeout: int = DEFAULT_TIMEOUT_MS, attempts: int = 1):
     last_err = None
     for i in range(attempts):
         try:
@@ -678,7 +677,7 @@ async def _extract_card_pairs(page):
     # intentar cargar anclas
     got_anchors = False
     try:
-        await page.wait_for_selector(anchors_selector, timeout=2500)
+        await page.wait_for_selector(anchors_selector, timeout=1500)
         got_anchors = True
     except Exception:
         pass
@@ -687,7 +686,7 @@ async def _extract_card_pairs(page):
             for _ in range(2):
                 await page.mouse.wheel(0, 1200)
                 await asyncio.sleep(0.15)
-            await page.wait_for_selector(anchors_selector, timeout=1500)
+            await page.wait_for_selector(anchors_selector, timeout=1000)
             got_anchors = True
         except Exception:
             got_anchors = False
