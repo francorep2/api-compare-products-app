@@ -50,26 +50,12 @@ def _enabled_stores_from_prefs(prefs) -> List[str]:
     return cand
 
 @router.get("/coto")
-async def search_coto_endpoint(
-    q: str | None = Query(None),
-    barcode: str | None = Query(None),
-    limit: int = Query(3, ge=1, le=10),
-):
+async def search_coto_endpoint(q: str | None = Query(None), barcode: str | None = Query(None), limit: int = Query(3, ge=1, le=10)):
     try:
-        items = await asyncio.wait_for(
-            search_coto(q=q, barcode=barcode, limit=limit),
-            timeout=REQUEST_BUDGET_SEC,
-        )
+        items = await asyncio.wait_for(search_coto(q=q, barcode=barcode, limit=limit), timeout=REQUEST_BUDGET_SEC)
         return {"results": items}
     except asyncio.TimeoutError:
-        # Cortamos nosotros antes que el proxy -> respuesta controlada
-        raise HTTPException(
-            status_code=504,
-            detail="Coto tardó demasiado en responder. Probá con otro término o reintentá."
-        )
-    except Exception as e:
-        # Log interno y error 502 “controlado”
-        raise HTTPException(status_code=502, detail=f"Error en Coto: {e.__class__.__name__}")
+        raise HTTPException(status_code=504, detail="Coto tardó demasiado en responder (modo rápido).")
 
 @router.get("/carrefour")
 async def search_carrefour_endpoint(
