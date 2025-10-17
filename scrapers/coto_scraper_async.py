@@ -8,8 +8,8 @@ from typing import List, Dict, Optional
 Product = Dict[str, Optional[str]]
 
 # URLs y Headers
-# Usamos la API de Coto, no la web
-COTO_API_URL = "https://www.cotodigital3.com.ar/api/search"
+# [CAMBIO] Esta es la nueva URL de la API v1 que usa Coto
+COTO_API_URL = "https://www.cotodigital3.com.ar/api/v1/products/search"
 COTO_BASE_URL = "https://www.cotodigital.com.ar"
 SUCURSAL_ID = "200" # ID de sucursal que usabas antes
 
@@ -20,41 +20,37 @@ HEADERS = {
 }
 
 # Timeout agresivo. 8 segundos es más que suficiente para una API.
-# Esto previene el timeout de 10-12s de Koyeb.
 CLIENT_TIMEOUT = 8.0
 
 # --- Scraper Principal ---
 
 async def search_coto_by_api(query: str, limit: int = 3) -> List[Product]:
     """
-    Busca productos en Coto usando su API interna.
-    Es rápido y cumple con el template requerido.
+    Busca productos en Coto usando su API interna v1.
     """
     
-    # Parámetros para la API
+    # [CAMBIO] Los parámetros de la API v1 son diferentes
     params = {
-        "q": query,
+        "query": query,     # 'q' ahora es 'query'
         "page": 1,
-        "idSucursal": SUCURSAL_ID
+        "storeId": SUCURSAL_ID, # 'idSucursal' ahora es 'storeId'
+        "sort": "relevance" # Nuevo parámetro requerido
     }
     
     results: List[Product] = []
 
     try:
-        # Usamos un cliente async
         async with httpx.AsyncClient(headers=HEADERS, timeout=CLIENT_TIMEOUT) as client:
             
-            # 1. Hacer la petición a la API
+            # 1. Hacer la petición a la nueva API
             response = await client.get(COTO_API_URL, params=params)
-            
-            # Levantar un error si Coto nos bloquea (4xx) o falla (5xx)
-            response.raise_for_status() 
+            response.raise_for_status() # Lanza error si es 4xx o 5xx
             
             data = response.json()
             
-            # 2. Validar la respuesta
+            # 2. Validar la respuesta (la estructura cambió)
             if not data or "products" not in data or not data["products"]:
-                print(f"[LOG] Coto API: No se encontraron productos para '{query}'")
+                print(f"[LOG] Coto API v1: No se encontraron productos para '{query}'")
                 return []
                 
             raw_products = data["products"]
@@ -62,27 +58,29 @@ async def search_coto_by_api(query: str, limit: int = 3) -> List[Product]:
             # 3. Mapear los resultados a tu template
             for prod in raw_products:
                 if len(results) >= limit:
-                    break # Salir si ya tenemos los productos que queríamos
+                    break
                 
-                # --- Mapeo al template ---
+                # --- [CAMBIO] Mapeo al nuevo template de la API v1 ---
                 
                 # a. title
                 title = prod.get("name")
                 
-                # b. price (la API ya lo da formateado como string)
-                price = prod.get("price")
-                if isinstance(price, (int, float)):
-                    price = f"ARS {price:.2f}" # Si viniera como nro, lo formateamos
+                # b. price (la API v1 lo da en un objeto 'price')
+                price_obj = prod.get("price", {})
+                price = price_obj.get("formattedValue") # Ej: "$ 1.499,00"
 
-                # c. url (la API da el 'link' relativo)
+                # c. url (la API v1 da un 'slug' para armar la URL)
                 prod_url = None
-                if prod.get("link"):
-                    prod_url = f"{COTO_BASE_URL}{prod['link']}"
+                if prod.get("slug"):
+                    prod_url = f"{COTO_BASE_URL}/{prod['slug']}"
 
-                # d. image_url
-                image_url = prod.get("mainImage")
+                # d. image_url (la API v1 da una lista de 'images')
+                image_url = None
+                images_list = prod.get("images", [])
+                if images_list and isinstance(images_list, list) and images_list[0].get("url"):
+                    image_url = images_list[0]["url"]
                 
-                # e. barcode (la API lo llama 'ean')
+                # e. barcode (la API v1 lo llama 'ean')
                 barcode = prod.get("ean")
 
                 # -------------------------
@@ -97,24 +95,22 @@ async def search_coto_by_api(query: str, limit: int = 3) -> List[Product]:
                 results.append(product_data)
 
     except httpx.TimeoutException:
-        # Esto pasa si la API de Coto tarda más que CLIENT_TIMEOUT
-        print(f"[ERROR] Timeout: La API de Coto no respondió a tiempo para '{query}'.")
-        return [] # Devolvemos lista vacía (falla rápido)
+        print(f"[ERROR] Timeout: La API v1 de Coto no respondió a tiempo para '{query}'.")
+        return []
         
     except httpx.HTTPStatusError as e:
-        # Esto pasa si Coto devuelve 403 (Bloqueado), 404, 500 (Error de Coto), etc.
-        print(f"[ERROR] HTTP Error: {e.response.status_code} al buscar '{query}'.")
+        # El 404 que tenías antes debería aparecer aquí si la URL vuelve a cambiar
+        print(f"[ERROR] HTTP Error v1: {e.response.status_code} al buscar '{query}'.")
         return []
         
     except Exception as e:
-        # Cualquier otro error (ej. JSON mal formado)
-        print(f"[ERROR] Error inesperado al procesar '{query}': {e}")
+        print(f"[ERROR] Error inesperado v1 al procesar '{query}': {e}")
         return []
         
     return results
 
 
-# --- Función de Búsqueda Principal (para tu endpoint) ---
+# --- Función de Búsqueda Principal (sin cambios) ---
 
 async def search(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Product]:
     """
@@ -122,18 +118,13 @@ async def search(q: Optional[str] = None, barcode: Optional[str] = None, limit: 
     """
     query_to_use = ""
     
-    # Priorizamos el barcode si existe
     if barcode:
         query_to_use = barcode
     elif q:
         query_to_use = q
         
     if not query_to_use:
-        return [] # No hay nada que buscar
+        return []
 
-    print(f"[INFO] Buscando en API de Coto: '{query_to_use}', limite={limit}")
+    print(f"[INFO] Buscando en API v1 de Coto: '{query_to_use}', limite={limit}")
     return await search_coto_by_api(query_to_use, limit=limit)
-
-
-# --- Ejemplo de cómo usarlo (para probar localmente) ---
-
