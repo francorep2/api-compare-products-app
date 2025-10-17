@@ -1,5 +1,4 @@
 # scrapers/carrefour_scraper_async.py
-
 import re
 import time
 import asyncio
@@ -7,8 +6,7 @@ from typing import List, Dict, Optional, Tuple
 from urllib.parse import quote
 
 import httpx
-from playwright.async_api import async_playwright, Browser, BrowserContext
-
+from app.core.browser_async import browser_manager_async  # 👈 usa el manager compartido
 from app.models.search_item import SearchItem
 
 # ---------- Constantes ----------
@@ -21,8 +19,6 @@ USER_AGENT = (
 BARCODE_RE = re.compile(r"^\d{8,14}$")
 
 # ---------- Estado global ----------
-_browser: Optional[Browser] = None
-_ctx: Optional[BrowserContext] = None
 _HTTPX_CLIENT: Optional[httpx.AsyncClient] = None
 
 # Caché en memoria (TTL corto para velocidad percibida)
@@ -46,18 +42,6 @@ async def get_httpx_client() -> httpx.AsyncClient:
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=20),
         )
     return _HTTPX_CLIENT
-
-
-async def get_carrefour_context() -> BrowserContext:
-    """BrowserContext global reusado para Playwright (solo si hace falta DOM)."""
-    global _browser, _ctx
-    if _ctx and not _ctx.is_closed():
-        return _ctx
-    if not _browser:
-        pw = await async_playwright().start()
-        _browser = await pw.chromium.launch(headless=True)
-    _ctx = await _browser.new_context(user_agent=USER_AGENT, viewport={"width": 1366, "height": 800})
-    return _ctx
 
 
 # ---------- Helpers ----------
@@ -187,6 +171,19 @@ def _cache_put(key: str, val: List[Dict]) -> None:
     _CACHE[key] = (time.time(), val)
 
 
+# ---------- Navegación robusta ----------
+async def _goto_with_retry(page, url: str, timeout_ms: int = 8000, attempts: int = 2) -> bool:
+    for i in range(attempts):
+        try:
+            await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+            return True
+        except Exception:
+            if i == attempts - 1:
+                return False
+            await asyncio.sleep(0.4)
+    return False
+
+
 # ---------- Búsqueda por API (con fix multi-palabra) ----------
 async def _api_search(q: str, by_ean: bool, limit: int) -> List[Dict]:
     """
@@ -246,95 +243,92 @@ async def _api_search(q: str, by_ean: bool, limit: int) -> List[Dict]:
 
 
 # ---------- Promos desde DOM (listado) ----------
-async def _scrape_promotions_from_search_page(ctx: BrowserContext, q: str) -> Dict[str, str]:
-    """Extrae URL -> promoción desde la página de resultados (rápido y con assets bloqueados)."""
-    page = await ctx.new_page()
+async def _scrape_promotions_from_search_page(q: str) -> Dict[str, str]:
+    """
+    Extrae URL -> promoción desde la página de resultados.
+    Usa page() del manager (contexto compartido + assets bloqueados).
+    """
     promotions_map: Dict[str, str] = {}
-    try:
-        await page.route(
-            "**/*",
-            lambda route: route.abort()
-            if route.request.resource_type in {"image", "font", "stylesheet", "media", "other"}
-            else route.continue_(),
-        )
+    url = f"{BASE}/{quote(q)}?_q={quote(q)}&map=ft"
+
+    async with browser_manager_async.page() as page:
+        # Limita a mismo dominio (ahorra requests externas)
         await page.route(
             re.compile(r"^(?!https?://(www\.)?carrefour\.com\.ar/).*$"),
             lambda r: r.abort(),
         )
 
-        url = f"{BASE}/{quote(q)}?_q={quote(q)}&map=ft"
-        await page.goto(url, timeout=7000, wait_until="domcontentloaded")
+        ok = await _goto_with_retry(page, url, timeout_ms=7000, attempts=2)
+        if not ok:
+            return promotions_map
 
+        # cookie banner
         try:
             await page.click("#onetrust-accept-btn-handler", timeout=1500)
-        except:
+        except Exception:
             pass
 
-        cards_data = await page.eval_on_selector_all(
-            "section[class*='vtex-product-summary']",
-            """(cards) => cards.map(n => {
-                const a = n.querySelector('a');
-                const url = a ? a.getAttribute('href') : '';
-                const sel = [
-                    'span.tooltipText',
-                    '[data-testid="discount-badge"]',
-                    '.discount-badge',
-                    '[class*="promotion"], [class*="promo"]'
-                ];
-                let txt = null;
-                for (const s of sel) {
-                    const el = n.querySelector(s);
-                    if (el && el.textContent) { txt = el.textContent.trim(); break; }
-                }
-                return { url, promotion: txt };
-            })""",
-        )
+        # lee promos visibles en cards
+        try:
+            cards_data = await page.eval_on_selector_all(
+                "section[class*='vtex-product-summary']",
+                """(cards) => cards.map(n => {
+                    const a = n.querySelector('a');
+                    const url = a ? a.getAttribute('href') : '';
+                    const sel = [
+                        'span.tooltipText',
+                        '[data-testid="discount-badge"]',
+                        '.discount-badge',
+                        '[class*="promotion"], [class*="promo"]'
+                    ];
+                    let txt = null;
+                    for (const s of sel) {
+                        const el = n.querySelector(s);
+                        if (el && el.textContent) { txt = el.textContent.trim(); break; }
+                    }
+                    return { url, promotion: txt };
+                })""",
+            )
+            for card in cards_data:
+                normalized_url = _normalize_url(card.get("url"))
+                text = card.get("promotion")
+                if normalized_url and text:
+                    promotions_map[normalized_url] = _short_promo(text) or text
+        except Exception as e:
+            print(f"[carrefour] Micro-DOM promos falló: {e}")
 
-        for card in cards_data:
-            normalized_url = _normalize_url(card.get("url"))
-            text = card.get("promotion")
-            if normalized_url and text:
-                promotions_map[normalized_url] = _short_promo(text) or text
-
-    except Exception as e:
-        print(f"[carrefour] Micro-DOM promos falló: {e}")
-    finally:
-        await page.close()
     return promotions_map
 
 
-# ---------- Promos desde página de producto (highlights) ----------
-async def _scrape_product_highlights(ctx: BrowserContext, url: str) -> List[str]:
+# ---------- Promos desde PDP (highlights) ----------
+async def _scrape_product_highlights(url: str) -> List[str]:
     """Extrae promos 'Adicional 20% OFF...' desde la página de detalle."""
-    page = await ctx.new_page()
     texts: List[str] = []
-    try:
-        await page.route(
-            "**/*",
-            lambda r: r.abort()
-            if r.request.resource_type in {"image", "font", "stylesheet", "media", "other"}
-            else r.continue_(),
-        )
+
+    async with browser_manager_async.page() as page:
         await page.route(
             re.compile(r"^(?!https?://(www\.)?carrefour\.com\.ar/).*$"),
             lambda r: r.abort(),
         )
 
-        await page.goto(url, timeout=8000, wait_until="domcontentloaded")
+        ok = await _goto_with_retry(page, url, timeout_ms=8000, attempts=2)
+        if not ok:
+            return texts
+
         try:
             await page.click("#onetrust-accept-btn-handler", timeout=1500)
-        except:
+        except Exception:
             pass
 
-        nodes = await page.eval_on_selector_all(
-            "div.valtech-carrefour-product-highlights-0-x-productHighlightWrapper span.valtech-carrefour-product-highlights-0-x-productHighlightText",
-            "els => els.map(e => e.textContent.trim()).filter(Boolean)",
-        )
-        texts = [t for t in nodes if t]
-    except Exception as e:
-        print(f"[carrefour] error en highlights: {e}")
-    finally:
-        await page.close()
+        try:
+            nodes = await page.eval_on_selector_all(
+                "div.valtech-carrefour-product-highlights-0-x-productHighlightWrapper span.valtech-carrefour-product-highlights-0-x-productHighlightText",
+                "els => els.map(e => e.textContent.trim()).filter(Boolean)",
+            )
+            texts = [t for t in nodes if t]
+        except Exception as e:
+            print(f"[carrefour] error en highlights: {e}")
+
     return texts
 
 
@@ -367,8 +361,7 @@ async def search_carrefour(
     if include_promotions and not is_barcode:
         need_dom_list = [i for i in api_items if not (i.get("promotion") or "").strip()]
         if need_dom_list:
-            ctx = await get_carrefour_context()
-            promo_map = await _scrape_promotions_from_search_page(ctx, query)
+            promo_map = await _scrape_promotions_from_search_page(query)
             if promo_map:
                 for item in need_dom_list:
                     u = _normalize_url(item.get("url"))
@@ -378,9 +371,7 @@ async def search_carrefour(
         # 3) Si aún falta promo, entra a la página de producto (highlights)
         need_detail = [i for i in api_items if not (i.get("promotion") or "").strip()]
         if need_detail:
-            ctx = await get_carrefour_context()
-            # limitar concurrencia y timeout por item
-            sem = asyncio.Semaphore(2)
+            sem = asyncio.Semaphore(2)  # limita concurrencia (RAM)
 
             async def enrich(it: Dict) -> None:
                 url = _normalize_url(it.get("url"))
@@ -388,7 +379,7 @@ async def search_carrefour(
                     return
                 async with sem:
                     try:
-                        texts = await asyncio.wait_for(_scrape_product_highlights(ctx, url), timeout=7.0)
+                        texts = await asyncio.wait_for(_scrape_product_highlights(url), timeout=7.0)
                         if texts:
                             it["promotion"] = _short_promo(texts[0]) or texts[0]
                     except asyncio.TimeoutError:
