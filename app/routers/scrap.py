@@ -69,7 +69,7 @@ async def search_coto_endpoint(
         )
     except Exception as e:
         # Log interno y error 502 “controlado”
-        raise HTTPException(status_code=502, detail=f"Error en Coto: {e.__class__.__name__}"
+        raise HTTPException(status_code=502, detail=f"Error en Coto: {e.__class__.__name__}")
 
 @router.get("/carrefour")
 async def search_carrefour_endpoint(
