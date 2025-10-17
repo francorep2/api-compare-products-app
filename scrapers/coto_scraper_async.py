@@ -13,9 +13,9 @@ COTO_SUCURSAL_ID = 200
 
 # Ajustes endurecidos
 CONCURRENCY_LIMIT = 2                 # bajar concurrencia para evitar throttling
-DEFAULT_TIMEOUT_MS = 350000            # + tiempo para montado React
-DEFAULT_SEARCH_TIMEOUT_MS = 350000
-PDP_TIMEOUT_MS = 350000
+DEFAULT_TIMEOUT_MS = 35000            # + tiempo para montado React
+DEFAULT_SEARCH_TIMEOUT_MS = 35000
+PDP_TIMEOUT_MS = 35000
 
 # ===================== Texto / matching =====================
 
