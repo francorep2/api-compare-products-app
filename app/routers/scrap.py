@@ -2,9 +2,9 @@ from typing import List, Optional
 from fastapi import Query
 from app.models.search_item import SearchItem, SearchResponse
 from app.services.coto import search_coto
-from app.services.dia import search  
+from app.services.dia import search
 from app.services.carrefour import search
-from app.services.jumbo import search  
+from app.services.jumbo import search
 from fastapi import APIRouter, Query
 from app.services.all import search_all_grouped
 from app.dependencies.auth import get_current_user, User
@@ -18,12 +18,14 @@ from app.auth.models import ScrapePrefs
 from app.services.all import search_all_grouped
 from playwright.async_api import BrowserContext
 from app.core.browser_async import browser_manager_async
+from fastapi import APIRouter, Query, HTTPException
+import asyncio
 
 
 router = APIRouter(prefix="/search", tags=["search"],dependencies=[Depends(get_current_user)],)
 
 VALID_STORES = {"coto","carrefour","dia","jumbo"}
-
+REQUEST_BUDGET_SEC = 25
 
 def as_list(v: Any) -> List[Dict]:
     if v is None: return []
@@ -53,8 +55,21 @@ async def search_coto_endpoint(
     barcode: str | None = Query(None),
     limit: int = Query(3, ge=1, le=10),
 ):
-    items = await search_coto(q=q, barcode=barcode, limit=limit)
-    return {"results": items}
+    try:
+        items = await asyncio.wait_for(
+            search_coto(q=q, barcode=barcode, limit=limit),
+            timeout=REQUEST_BUDGET_SEC,
+        )
+        return {"results": items}
+    except asyncio.TimeoutError:
+        # Cortamos nosotros antes que el proxy -> respuesta controlada
+        raise HTTPException(
+            status_code=504,
+            detail="Coto tardó demasiado en responder. Probá con otro término o reintentá."
+        )
+    except Exception as e:
+        # Log interno y error 502 “controlado”
+        raise HTTPException(status_code=502, detail=f"Error en Coto: {e.__class__.__name__}"
 
 @router.get("/carrefour")
 async def search_carrefour_endpoint(
