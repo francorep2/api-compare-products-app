@@ -2,7 +2,7 @@
 from typing import List, Dict, Optional, Any
 import json, urllib.parse, re, time, datetime, os, asyncio, unicodedata, contextlib
 
-from app.core.browser_async import browser_manager_async  # 👈 usamos el manager compartido
+from app.core.browser_async import browser_manager_async
 from scrapers._utils_promos import PROMO_NORMALIZER
 
 # ===================== Config =====================
@@ -12,11 +12,13 @@ COTO_BASE = "https://www.cotodigital.com.ar"
 COTO_STATIC_HOST = "https://static.cotodigital3.com.ar"
 COTO_SUCURSAL_ID = 200
 
-# Ajustes endurecidos para free tier
-CONCURRENCY_LIMIT = 2                 # bajar concurrencia para evitar throttling y OOM
-DEFAULT_TIMEOUT_MS = 30000            # menor que antes para no colgar workers
-DEFAULT_SEARCH_TIMEOUT_MS = 30000
-PDP_TIMEOUT_MS = 30000
+# Ajustes endurecidos + presupuesto interno
+CONCURRENCY_LIMIT = 2
+DEFAULT_TIMEOUT_MS = 12000
+DEFAULT_SEARCH_TIMEOUT_MS = 10000
+PDP_TIMEOUT_MS = 10000
+
+SCRAPER_BUDGET_SEC = 20.0  # deja ~5s al endpoint (wait_for=25s)
 
 # ===================== Texto / matching =====================
 
@@ -86,7 +88,7 @@ def absolutize(base: str, href: str, current_url: Optional[str] = None) -> str:
     path = href if href.startswith("/") else ("/"+href)
     return f"{parts[0]}//{parts[2]}{path}"
 
-# Bloqueo de recursos pesados adicionales (el manager ya bloquea varios a nivel contexto)
+# Bloqueo de recursos pesados para acelerar cargas
 async def _enable_speed_routes(page):
     async def _route_handler(route):
         try:
@@ -126,6 +128,10 @@ def choose_barcode(*cands) -> Optional[str]:
         d = normalize_barcode(str(c) if c is not None else None)
         if d: return d
     return None
+
+def _time_left(deadline: float) -> float:
+    import time as _t
+    return deadline - _t.monotonic()
 
 async def _compute_discount_from_prices(page) -> Optional[str]:
     try:
@@ -288,7 +294,7 @@ async def parse_jsonld_product(page):
 
     def _coerce_price(v):
         if v is None: return None
-        s = str(v).strip().replace(".", "").replace(",", ".")
+        s = str(v).strip().replace(".", "").replace(",", ".")  # "2.653,33" -> "2653.33"
         try:
             return float(s)
         except:
@@ -661,111 +667,180 @@ async def fetch_coto_pdp(href, timeout=PDP_TIMEOUT_MS) -> Dict:
                 "promotion": None,
             }
 
+# ===== Helpers extra: extracción rápida desde la grilla =====
+
+async def _extract_card_pairs(page):
+    """
+    Devuelve lista de (href, card_promo, card_title) desde la grilla.
+    """
+    anchors_selector = "a[href*='/sitios/cdigi/productos/']"
+
+    # intentar cargar anclas
+    got_anchors = False
+    try:
+        await page.wait_for_selector(anchors_selector, timeout=2500)
+        got_anchors = True
+    except Exception:
+        pass
+    if not got_anchors:
+        try:
+            for _ in range(2):
+                await page.mouse.wheel(0, 1200)
+                await asyncio.sleep(0.15)
+            await page.wait_for_selector(anchors_selector, timeout=1500)
+            got_anchors = True
+        except Exception:
+            got_anchors = False
+
+    pairs = []
+
+    if got_anchors:
+        # JS: mapea card -> href, titulo y promo visible
+        data = await page.eval_on_selector_all(
+            "a[href*='/sitios/cdigi/productos/']",
+            """(as) => as.slice(0, 30).map(a => {
+                const href = a.getAttribute('href') || '';
+                const card = a.closest('[class*="product"], [class*="summary"], [class*="grid"]') || a.parentElement;
+                const pick = (sel) => card?.querySelector(sel);
+                const tSel = [
+                  "[data-testid='product-title']",
+                  "h3", "h2", ".product__title", ".product-name"
+                ];
+                let title = null;
+                for (const s of tSel) { const el = pick(s); if (el && el.textContent) { title = el.textContent.trim(); break; } }
+
+                const pSel = [
+                  "[data-testid*='discount']",
+                  "[data-testid*='badge']",
+                  "[data-testid*='promo']",
+                  "[class*='flagName']",
+                  "[class*='flagText']",
+                  "[class*='productHighlightText']",
+                  ".badge", ".promo", ".promotion", ".tag"
+                ];
+                let promo = null;
+                for (const s of pSel) { const el = pick(s); if (el && el.textContent) { promo = el.textContent.trim(); break; } }
+
+                return { href, card_title: title, card_promo: promo };
+            })"""
+        )
+        for d in data or []:
+            href = d.get("href") or ""
+            pairs.append((href, d.get("card_promo"), d.get("card_title")))
+    else:
+        # fallback regex
+        html = await page.content()
+        for h in re.findall(r'href="([^"]+/sitios/cdigi/productos/[^"]+)"', html, flags=re.I):
+            pairs.append((h, None, None))
+
+    return pairs
+
+# ===================== Búsqueda =====================
+
 async def coto_search_top_n(query: str, limit: int = TOP_N) -> List[Dict]:
     """
-    Busca en Coto y devuelve top-N items.
-    - Lee HREFs de la grilla.
-    - Extrae promo en la CARD (badge) y la usa como fallback si la PDP no trae nada.
-    - Dedup por URL final.
+    Busca en Coto y devuelve top-N items, con presupuesto interno.
+    Si el tiempo se agota, devuelve resultados de card (sin PDP) para evitar 504.
     """
+    import time as _t
+    deadline = _t.monotonic() + SCRAPER_BUDGET_SEC
+
     search_url = (
         f"{COTO_BASE}/sitios/cdigi/categoria"
         f"?_dyncharset=utf-8&Dy=1&Ntt={urllib.parse.quote(query)}&idSucursal={COTO_SUCURSAL_ID}"
     )
 
+    # 1) abrir búsqueda y extraer hrefs + card promo + card title
     async with browser_manager_async.page() as page:
         await _enable_speed_routes(page)
         try:
-            print(f"[LOG] Coto classic GET {search_url}")
             await _goto_with_retries(page, search_url, wait_until="domcontentloaded", timeout=DEFAULT_SEARCH_TIMEOUT_MS)
-
-            anchors_selector = "a[href*='/sitios/cdigi/productos/']"
-            got_anchors = False
-            try:
-                await page.wait_for_selector(anchors_selector, timeout=3500)
-                got_anchors = True
-            except Exception:
-                pass
-            if not got_anchors:
-                try:
-                    for _ in range(2):
-                        await page.mouse.wheel(0, 1200)
-                        await asyncio.sleep(0.2)
-                    await page.wait_for_selector(anchors_selector, timeout=2000)
-                    got_anchors = True
-                except Exception:
-                    got_anchors = False
-
-            anchors = page.locator(anchors_selector)
-            try:
-                total = await anchors.count() if got_anchors else await anchors.count()
-            except Exception:
-                total = 0
-
-            hrefs_with_cardpromo: List[tuple[str, Optional[str]]] = []
-
-            if total:
-                take = min(total, max(8, limit * 5))
-                for i in range(take):
-                    a = anchors.nth(i)
-                    href = (await a.get_attribute("href")) or ""
-                    if not href:
-                        continue
-                    card_promo = None
-                    try:
-                        card_promo = await extract_promotion_from_card(a)
-                    except:
-                        card_promo = None
-                    hrefs_with_cardpromo.append((href, card_promo))
-            else:
-                html = await page.content()
-                found = re.findall(r'href="([^"]+/sitios/cdigi/productos/[^"]+)"', html, flags=re.I)
-                for h in found:
-                    hrefs_with_cardpromo.append((h, None))
-
-            # normalizar y deduplicar
-            norm_pairs = []
-            seen_href = set()
-            for h, cp in hrefs_with_cardpromo:
-                try:
-                    full = absolutize(COTO_BASE, h)
-                    full = sanitize_coto_href(full)
-                except Exception:
-                    full = h
-                if full in seen_href:
-                    continue
-                seen_href.add(full)
-                norm_pairs.append((full, cp))
-            hrefs_with_cardpromo = norm_pairs
-
-            if not hrefs_with_cardpromo:
-                await save_debug_html(page, "coto_classic_empty")
-                return []
-
+            href_triplets = await _extract_card_pairs(page)  # [(href, card_promo, card_title)]
         except Exception as e:
             print("[LOG] Classic search error:", e)
             await save_debug_html(page, "coto_classic_error")
-            return []
+            href_triplets = []
 
-    # Fuera del with para no mantener la page abierta durante el fan-out
+    if not href_triplets:
+        return []
+
+    # Normalizar y deduplicar
+    norm_pairs = []
+    seen_href = set()
+    for h, cp, ct in href_triplets[: max(limit * 5, 10)]:  # cap early
+        try:
+            full = absolutize(COTO_BASE, h)
+            full = sanitize_coto_href(full)
+        except Exception:
+            full = h
+        if full in seen_href:
+            continue
+        seen_href.add(full)
+        norm_pairs.append((full, cp, ct))
+
+    # 2) Si ya tenemos suficientes con título de card, devolvé rápido (sin PDP)
+    quick: List[Dict] = []
+    for url, card_promo, card_title in norm_pairs:
+        if card_title:
+            quick.append({
+                "title": clean_text(card_title),
+                "price": None,
+                "url": url,
+                "image_url": None,
+                "barcode": None,
+                "promotion": _pick_best_promo_text(card_promo or "") if card_promo else None,
+            })
+            if len(quick) >= limit:
+                return quick[:limit]
+
+    # 3) Si queda poco tiempo, devolvé aunque sea URL + promo
+    if _time_left(deadline) < 5.0:
+        fallback = []
+        for url, card_promo, card_title in norm_pairs[:limit]:
+            fallback.append({
+                "title": clean_text(card_title) if card_title else None,
+                "price": None,
+                "url": url,
+                "image_url": None,
+                "barcode": None,
+                "promotion": _pick_best_promo_text(card_promo or "") if card_promo else None,
+            })
+        return fallback
+
+    # 4) Fan-out a PDP (acotado) solo si tenemos tiempo
+    candidates = norm_pairs[: max(limit * 3, 6)]
     results: List[Dict] = []
     seen: set[str] = set()
     sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
 
-    async def _job(href: str, card_promo: Optional[str]):
+    async def _job(url: str, card_promo: Optional[str], card_title: Optional[str]):
+        # Si el tiempo se agota, evitá PDP
+        if _time_left(deadline) < 4.0:
+            return {
+                "title": clean_text(card_title) if card_title else None,
+                "price": None,
+                "url": url,
+                "image_url": None,
+                "barcode": None,
+                "promotion": _pick_best_promo_text(card_promo or "") if card_promo else None,
+            }
         async with sem:
             try:
                 pdp = await asyncio.wait_for(
-                    fetch_coto_pdp(href, timeout=PDP_TIMEOUT_MS),
-                    timeout=(PDP_TIMEOUT_MS/1000.0) + 6.0,
+                    fetch_coto_pdp(url, timeout=PDP_TIMEOUT_MS),
+                    timeout=(PDP_TIMEOUT_MS/1000.0) + 2.0,
                 )
             except Exception:
-                pdp = {"title": None, "price": None, "url": href, "image_url": None, "barcode": None, "promotion": card_promo}
-            if pdp.get("promotion") is None and card_promo:
-                pdp["promotion"] = card_promo
+                pdp = {"title": clean_text(card_title) if card_title else None,
+                       "price": None, "url": url, "image_url": None,
+                       "barcode": None, "promotion": None}
+            if not pdp.get("promotion") and card_promo:
+                pdp["promotion"] = _pick_best_promo_text(card_promo) or card_promo
+            if not pdp.get("title") and card_title:
+                pdp["title"] = clean_text(card_title)
             return pdp
 
-    tasks = [asyncio.create_task(_job(h, cp)) for h, cp in hrefs_with_cardpromo]
+    tasks = [asyncio.create_task(_job(u, cp, ct)) for (u, cp, ct) in candidates]
 
     try:
         for coro in asyncio.as_completed(tasks):
@@ -780,15 +855,32 @@ async def coto_search_top_n(query: str, limit: int = TOP_N) -> List[Dict]:
             if len(results) >= limit:
                 break
     finally:
+        # cancelar pendientes si ya cumplimos el límite
         if len(results) >= limit:
             for t in tasks:
                 if not t.done():
                     t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    if not results:
-        # no rompamos: devolvemos hasta TOP_N si no hubo matches plenos
-        return []
+    # 5) Si no llegamos a limit y aún queda tiempo, rellená con quick/fallback
+    if len(results) < limit:
+        pool = quick or [
+            {
+                "title": clean_text(ct) if ct else None,
+                "price": None,
+                "url": u,
+                "image_url": None,
+                "barcode": None,
+                "promotion": _pick_best_promo_text(cp or "") if cp else None,
+            }
+            for (u, cp, ct) in norm_pairs
+        ]
+        for it in pool:
+            if it["url"] in {r["url"] for r in results}:
+                continue
+            results.append(it)
+            if len(results) >= limit:
+                break
 
     return results[:limit]
 
