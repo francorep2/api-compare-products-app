@@ -17,8 +17,7 @@ class AsyncBrowserManager:
         self._pw: Playwright | None = None
         self._browser: Browser | None = None
         
-    def get_browser_context(DEFAULT_CTX):
-        return self._browser.new_context(**DEFAULT_CTX)
+   
       
     async def startup(self, headless: bool = True):
         if self._pw is None:

@@ -1,6 +1,7 @@
 from typing import List, Dict, Optional
 from app.core.browser_async import browser_manager_async
-from scrapers.coto_scraper_async import search as coto_search
+from scrapers.coto_scraper_async import search_coto_requests as coto_search
+from scrapers.coto_scraper_async import search_coto_by_barcode as coto_search_barcode
 import json, re
 
 # --- ESTA PARTE DE TU CÓDIGO ORIGINAL SE MANTIENE EXACTAMENTE IGUAL ---
@@ -57,9 +58,10 @@ DEFAULT_CTX = {
 }
 
 
-# --- FUNCIÓN CORREGIDA ---
 async def search_coto(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
-    ctx = await browser_manager_async.get_browser_context(DEFAULT_CTX)
+    print(f"[#EAN TASK 2 COTO] -------------> q={q}")
+    return await coto_search(q=q, limit=limit)
 
-    print(f"[#EAN TASK 2 COTO] -------------> q={q}, barcode={barcode}")
-    return await coto_search(ctx=ctx, q=q, barcode=barcode, limit=limit)
+async def search_coto_barcode(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
+    print(f"[#EAN TASK 2 COTO] -------------> barcode={barcode}")
+    return await coto_search_barcode(barcode=barcode, limit=limit)
