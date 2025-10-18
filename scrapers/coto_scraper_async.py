@@ -29,7 +29,6 @@ _UA = (
 _SESSION: Session = crequests.Session(
     impersonate="chrome",  # 🎯 la clave para pasar WAF sin browser
     timeout=_DEFAULT_TIMEOUT,
-    http2=True,
 )
 _SESSION.headers.update(
     {
