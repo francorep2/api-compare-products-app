@@ -24,3 +24,4 @@ gunicorn
 uvicorn[standard]
 httpx[http2]
 lxml
+curl_cffi==0.6.2
