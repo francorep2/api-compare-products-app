@@ -1,15 +1,15 @@
 # scrapers/coto_requests.py
 from __future__ import annotations
 from typing import List, Dict, Optional
-import re, json, html, unicodedata, time
+import re, json, html, unicodedata, time, logging
 import urllib.parse as _url
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-try:
-    # Si tenés tu normalizador propio, se usa. Si no, se ignora sin romper.
-    from scrapers._utils_promos import PROMO_NORMALIZER as _PROMO_NORMALIZER
-except Exception:
-    _PROMO_NORMALIZER = lambda s: s  # fallback
+log = logging.getLogger("scraper.coto")
+if not log.handlers:
+    logging.basicConfig(level=logging.INFO)
 
 # ===================== Config =====================
 
@@ -32,8 +32,18 @@ _SESSION.headers.update(
         "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
+        "Connection": "keep-alive",
     }
 )
+# Retries básicos
+retry = Retry(total=2, backoff_factor=0.4, status_forcelist=(429, 500, 502, 503, 504))
+_SESSION.mount("https://", HTTPAdapter(max_retries=retry))
+_SESSION.mount("http://", HTTPAdapter(max_retries=retry))
+
+try:
+    from scrapers._utils_promos import PROMO_NORMALIZER as _PROMO_NORMALIZER
+except Exception:
+    _PROMO_NORMALIZER = lambda s: s
 
 # ===================== Texto / matching =====================
 
@@ -45,62 +55,123 @@ def _norm_text(s: str) -> str:
     return s
 
 def _title_seems_related(title: str, q: str) -> bool:
-    """Filtro simple de relevancia para no devolver cosas colgadas."""
     t = _norm_text(title)
     s = _norm_text(q)
-    must = [w for w in s.split() if len(w) >= 3][:3]  # hasta 3 términos clave
+    must = [w for w in s.split() if len(w) >= 3][:3]
     return all(w in t for w in must) if must else True
 
-# ===================== Helpers de red / parse =====================
+# ===================== Red / cookies =====================
 
-_JSON_RE = re.compile(
-    r"__PRELOADED_STATE__\s*=\s*(\{.*?\})\s*;?\s*</script>",
-    re.DOTALL | re.IGNORECASE,
-)
-
-_LDJSON_RE = re.compile(
-    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-    re.DOTALL | re.IGNORECASE,
-)
+def _bootstrap_cookies():
+    """
+    Coto necesita sucursal seteada para devolver resultados consistentes.
+    Pegamos a home con idSucursal para que el servidor nos deje cookies.
+    """
+    try:
+        url = f"{COTO_BASE}/sitios/cdigi/home"
+        _SESSION.get(url, params={"idSucursal": str(COTO_SUCURSAL_ID), "Dy": "1"}, timeout=_DEFAULT_TIMEOUT)
+        # cookie defensiva
+        _SESSION.cookies.set("idSucursal", str(COTO_SUCURSAL_ID), domain="www.cotodigital.com.ar")
+        _SESSION.cookies.set("idSucursal", str(COTO_SUCURSAL_ID), domain="cotodigital.com.ar")
+    except Exception as e:
+        log.warning(f"[COTO] fallo bootstrap cookies: {e!r}")
 
 def _get(url: str, *, params: Optional[dict] = None, timeout: int = _DEFAULT_TIMEOUT) -> str:
     r = _SESSION.get(url, params=params, timeout=timeout)
     r.raise_for_status()
     return r.text
 
+# ===================== Extractores =====================
+
+# Variantes comunes donde los sitios guardan el estado
+_PRELOADED_RES = [
+    re.compile(r"__PRELOADED_STATE__\s*=\s*(\{.*?\})\s*;?\s*</script>", re.DOTALL | re.IGNORECASE),
+    re.compile(r"preloadedState\s*=\s*(\{.*?\})\s*;?\s*</script>", re.DOTALL | re.IGNORECASE),
+    re.compile(r"INITIAL_STATE\s*=\s*(\{.*?\})\s*;?\s*</script>", re.DOTALL | re.IGNORECASE),
+    re.compile(r"window\.__.*STATE__\s*=\s*(\{.*?\})\s*;?\s*</script>", re.DOTALL | re.IGNORECASE),
+]
+
+_LDJSON_RE = re.compile(
+    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    re.DOTALL | re.IGNORECASE,
+)
+
 def _extract_preloaded_state(html_text: str) -> Optional[dict]:
-    """Busca window.__PRELOADED_STATE__ = {...} en la página."""
-    m = _JSON_RE.search(html_text)
-    if not m:
-        return None
-    raw = m.group(1)
-    # A veces viene con entities
-    raw = html.unescape(raw)
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        # Fallback: intenta limpiar comas colgantes si existieran
+    for rx in _PRELOADED_RES:
+        m = rx.search(html_text)
+        if not m:
+            continue
+        raw = html.unescape(m.group(1))
+        # arregla comas colgantes
         raw2 = re.sub(r",\s*}", "}", raw)
         raw2 = re.sub(r",\s*]", "]", raw2)
         try:
             return json.loads(raw2)
         except Exception:
-            return None
+            continue
+    return None
 
 def _extract_ldjson_products(html_text: str) -> List[dict]:
-    """Extrae objetos Product desde JSON-LD (fallback si no hay PRELOADED_STATE)."""
     out = []
     for block in _LDJSON_RE.findall(html_text):
         try:
             data = json.loads(html.unescape(block))
         except Exception:
             continue
-        # Puede venir como dict o lista
-        candidates = data if isinstance(data, list) else [data]
-        for obj in candidates:
+        arr = data if isinstance(data, list) else [data]
+        for obj in arr:
             if isinstance(obj, dict) and obj.get("@type") in ("Product", "ProductGroup"):
                 out.append(obj)
     return out
+
+# Fallback por HTML: agarra tarjetas básicas
+_CARD_RE = re.compile(
+    r'<a[^>]*href="(?P<href>/sitios/cdigi/productos/[^"]+)"[^>]*>(?P<inner>.*?)</a>',
+    re.DOTALL | re.IGNORECASE,
+)
+_TITLE_RE = re.compile(r'(?:title="([^"]+)")|(?:alt="([^"]+)")', re.IGNORECASE)
+_IMG_RE = re.compile(r'<img[^>]+src="([^"]+)"', re.IGNORECASE)
+# Busca precios como 1.234,56 o 1234.56; prefijo opcional $ o ARS
+_PRICE_RE = re.compile(r'(?:\$|ARS)?\s*([0-9]{1,3}(?:[\.\s][0-9]{3})*(?:,[0-9]{2})|[0-9]+(?:\.[0-9]{2}))')
+
+def _parse_cards_html(html_text: str) -> List[dict]:
+    items: List[dict] = []
+    for m in _CARD_RE.finditer(html_text):
+        href = m.group("href")
+        inner = m.group("inner") or ""
+        # título
+        title = None
+        tmatch = _TITLE_RE.search(inner)
+        if tmatch:
+            title = tmatch.group(1) or tmatch.group(2)
+        if not title:
+            # fallback: texto entre etiquetas
+            txt = re.sub(r"<[^>]+>", " ", inner)
+            txt = re.sub(r"\s+", " ", txt).strip()
+            title = txt[:120] or "Producto Coto"
+
+        # imagen
+        img = ""
+        im = _IMG_RE.search(inner)
+        if im:
+            img = im.group(1)
+
+        # precio
+        price_val = None
+        pm = _PRICE_RE.search(inner)
+        if pm:
+            price_val = pm.group(1)
+
+        item = {
+            "title": title.strip(),
+            "price": f"ARS {price_val}".replace("  ", " ") if price_val else "ARS 0.00",
+            "url": _abs_url(href),
+            "image_url": _img_url_from_rel(img),
+            "barcode": None,
+            "promotion": None,
+        }
+        items.append(item)
+    return items
 
 def _price_to_ars_string(p: Optional[float | int | str]) -> Optional[str]:
     if p is None:
@@ -127,130 +198,76 @@ def _img_url_from_rel(path: str) -> str:
         return ""
     if path.startswith("http"):
         return path
-    # Coto usualmente sirve imágenes desde static.cotodigital3.com.ar
+    if path.startswith("//"):
+        return "https:" + path
     if path.startswith("/"):
         return COTO_STATIC_HOST + path
     return COTO_STATIC_HOST.rstrip("/") + "/" + path
 
-# ===================== Mapping de resultados =====================
+# ===================== Mapping =====================
 
 def _map_item_from_preloaded(product: dict) -> Optional[dict]:
-    """
-    Intenta mapear un item desde la estructura interna de Coto (PRELOADED_STATE),
-    contemplando variaciones de nombres de campos.
-    """
     title = product.get("displayName") or product.get("name") or product.get("title")
     if not title:
         return None
-
-    # URL del producto
-    url = (
-        product.get("url") or
-        product.get("pdpUrl") or
-        product.get("link") or
-        product.get("productUrl")
-    )
-    url = _abs_url(url)
-
-    # Imagen
-    img = (
-        product.get("imageUrl") or
-        product.get("image") or
-        product.get("mainImage") or
-        product.get("thumbnail")
-    )
-    image_url = _img_url_from_rel(img)
-
-    # Precio (varía mucho, contemplamos varias rutas)
+    url = product.get("url") or product.get("pdpUrl") or product.get("link") or product.get("productUrl") or ""
+    img = product.get("imageUrl") or product.get("image") or product.get("mainImage") or product.get("thumbnail") or ""
     price = (
-        product.get("price") or
-        product.get("priceDecimal") or
-        (product.get("prices") or {}).get("price") or
-        (product.get("prices") or {}).get("listPrice")
+        product.get("price")
+        or product.get("priceDecimal")
+        or (product.get("prices") or {}).get("price")
+        or (product.get("prices") or {}).get("listPrice")
     )
-    price_str = _price_to_ars_string(price) or "ARS 0.00"
-
-    # Barcode
-    barcode = (
-        product.get("ean") or
-        product.get("barcode") or
-        product.get("gtin") or
-        product.get("gtin13")
-    )
-
-    # Promoción / badges
-    promo_raw = (
-        product.get("promotion") or
-        product.get("badge") or
-        product.get("promo") or
-        (product.get("badges") or [{}])[0:1]
-    )
+    barcode = product.get("ean") or product.get("barcode") or product.get("gtin") or product.get("gtin13")
+    promo_raw = product.get("promotion") or product.get("badge") or product.get("promo") or product.get("badges")
     if isinstance(promo_raw, list):
-        promo_raw = " ".join(str(x) for x in promo_raw if x)
-    promotion = _PROMO_NORMALIZER(str(promo_raw)) if promo_raw else None
+        promo_raw = " ".join([str(x) for x in promo_raw if x])
 
     return {
         "title": title.strip(),
-        "price": price_str,
-        "url": url,
-        "image_url": image_url,
+        "price": _price_to_ars_string(price) or "ARS 0.00",
+        "url": _abs_url(url),
+        "image_url": _img_url_from_rel(img),
         "barcode": str(barcode) if barcode else None,
-        "promotion": promotion or None,
+        "promotion": _PROMO_NORMALIZER(str(promo_raw)) if promo_raw else None,
     }
 
 def _map_item_from_ldjson(obj: dict) -> Optional[dict]:
     title = obj.get("name") or obj.get("title")
     if not title:
         return None
-
-    # Precio en "offers" (schema.org)
     price = None
     offers = obj.get("offers")
     if isinstance(offers, dict):
         price = offers.get("price")
     elif isinstance(offers, list) and offers:
         price = offers[0].get("price")
-
     image = obj.get("image")
     if isinstance(image, list):
         image = image[0] if image else None
-
-    url = obj.get("url")
+    url = obj.get("url") or ""
     return {
         "title": title.strip(),
         "price": _price_to_ars_string(price) or "ARS 0.00",
-        "url": _abs_url(url or ""),
+        "url": _abs_url(url),
         "image_url": _img_url_from_rel(image or ""),
         "barcode": obj.get("gtin13") or obj.get("gtin") or None,
         "promotion": None,
     }
 
-# ===================== Scraping de búsqueda =====================
+# ===================== Search =====================
 
 def _build_search_url(q: str) -> str:
-    # Coto usa páginas de búsqueda bajo /sitios/cdigi/busqueda con Ntt y idSucursal
-    params = {
-        "Ntt": q,
-        "idSucursal": str(COTO_SUCURSAL_ID),
-        "Dy": "1",  # permite resultados
-    }
+    params = {"Ntt": q, "idSucursal": str(COTO_SUCURSAL_ID), "Dy": "1"}
     return f"{COTO_BASE}/sitios/cdigi/busqueda?{_url.urlencode(params)}"
-
-def _build_pdp_url_from_barcode(barcode: str) -> Optional[str]:
-    """
-    Heurística: muchas PDP aceptan ?Dy=1&idSucursal=200 y el patrón /productos/.../_/R-<code>-<code>-<sucursal>
-    Sin API pública estable, primero probamos por búsqueda, tomamos el top exacto.
-    """
-    return None  # se resuelve por búsqueda para robustez
 
 def _parse_search_page(html_text: str, q: str) -> List[dict]:
     items: List[dict] = []
 
+    # 1) PRELOADED STATE
     state = _extract_preloaded_state(html_text)
     if state:
-        # Intentamos rutas típicas donde vienen los productos
         candidates = []
-        # Ejemplos posibles: state["search"]["results"]["products"], state["results"], etc.
         for path in [
             ["search", "results", "products"],
             ["results", "products"],
@@ -268,59 +285,59 @@ def _parse_search_page(html_text: str, q: str) -> List[dict]:
             if ok and isinstance(cur, list):
                 candidates = cur
                 break
-
         for p in candidates:
             mapped = _map_item_from_preloaded(p)
             if mapped and _title_seems_related(mapped["title"], q):
                 items.append(mapped)
 
-    # Fallback a JSON-LD si no hay PRELOADED_STATE o devolvió vacío
+    # 2) JSON-LD fallback
     if not items:
         for obj in _extract_ldjson_products(html_text):
             mapped = _map_item_from_ldjson(obj)
             if mapped and _title_seems_related(mapped["title"], q):
                 items.append(mapped)
 
-    # De-dup por URL
-    dedup: Dict[str, dict] = {}
+    # 3) HTML cards fallback
+    if not items:
+        for it in _parse_cards_html(html_text):
+            if _title_seems_related(it["title"], q):
+                items.append(it)
+
+    # de-dup por URL
+    seen: Dict[str, dict] = {}
     for it in items:
-        if it["url"] and it["url"] not in dedup:
-            dedup[it["url"]] = it
-
-    return list(dedup.values())
-
-# ===================== API pública =====================
+        u = it.get("url") or ""
+        if u and u not in seen:
+            seen[u] = it
+    return list(seen.values())
 
 def search_coto_requests(q: str, limit: int = TOP_N) -> List[Dict]:
-    """
-    Búsqueda por texto. Devuelve hasta 'limit' items con:
-      { title, price: "ARS ...", url, image_url, barcode, promotion|null }
-    """
+    _bootstrap_cookies()
     url = _build_search_url(q)
     html_text = _get(url)
+    # quick guard contra bloqueos
+    if "Access Denied" in html_text or "verificá que sos humano" in html_text.lower():
+        log.warning("[COTO] posible bloqueo / captcha")
+        return []
     items = _parse_search_page(html_text, q)
 
-    # Orden básico: exactitud por substring + precio disponible
     qn = _norm_text(q)
     def _score(it: dict) -> tuple:
         t = _norm_text(it["title"])
         exact = (qn in t)
         has_price = it.get("price") not in (None, "ARS 0.00")
-        return (exact, has_price, len(t))  # heurística simple
-
+        return (exact, has_price, -len(t))
     items.sort(key=_score, reverse=True)
     return items[:limit]
 
 def search_coto_by_barcode(barcode: str, limit: int = TOP_N) -> List[Dict]:
-    """
-    Búsqueda por código de barras: usamos la misma página de búsqueda pero con el EAN.
-    """
-    items = search_coto_requests(barcode, limit=limit)
-    # Preferimos coincidencias que incluyan el EAN en título/URL si existe
+    # usamos la misma búsqueda por Ntt=barcode
+    items = search_coto_requests(str(barcode), limit=limit)
     bn = str(barcode)
     def _score(it: dict) -> tuple:
         t = _norm_text(it["title"])
-        exact = (bn in (it.get("barcode") or "")) or (bn in it.get("url", ""))
-        return (exact, bn in t, len(t))
+        exact = (bn == (it.get("barcode") or "")) or (bn in (it.get("url") or ""))
+        return (exact, bn in t, -len(t))
     items.sort(key=_score, reverse=True)
     return items[:limit]
+
