@@ -1,67 +1,40 @@
+# app/services/coto.py
+from __future__ import annotations
 from typing import List, Dict, Optional
-from app.core.browser_async import browser_manager_async
-from scrapers.coto_scraper_async import search_coto_requests as coto_search
-from scrapers.coto_scraper_async import search_coto_by_barcode as coto_search_barcode
-import json, re
+import asyncio
+import logging
 
-# --- ESTA PARTE DE TU CÓDIGO ORIGINAL SE MANTIENE EXACTAMENTE IGUAL ---
-async def _json_parse_safe(txt: str):
+# ✅ IMPORTA EL SCRAPER SINCRÓNICO (requests) QUE TE PASÉ ANTES
+from scrapers.coto_requests import (
+    search_coto_requests as _search_coto_requests_sync,
+    search_coto_by_barcode as _search_coto_by_barcode_sync,
+)
+
+log = logging.getLogger("coto")
+
+# Nota: ya no necesitamos Playwright ni helpers de LD+JSON aquí.
+# Todo lo hace el scraper síncrono y nosotros lo envolvemos async-safe.
+
+async def search_coto(
+    q: Optional[str] = None,
+    barcode: Optional[str] = None,
+    limit: int = 3
+) -> List[Dict]:
+    """
+    Wrapper async que ejecuta el scraper 'requests' en un thread.
+    Respeta prioridad de barcode si viene, si no usa q.
+    """
+    if not q and not barcode:
+        return []
+
     try:
-        return json.loads(txt)
-    except Exception:
-        return None
-
-async def _page_contains_ean(page, ean: str) -> bool:
-    try:
-        scripts = await page.eval_on_selector_all(
-            "script[type='application/ld+json']",
-            "nodes => nodes.map(n => n.textContent)"
-        )
-    except Exception:
-        scripts = []
-    
-    for s in scripts or []:
-        data = await _json_parse_safe(s)
-        if not data:
-            continue
-
-        def has_gtin(obj) -> bool:
-            if not isinstance(obj, dict):
-                return False
-            g = obj.get("gtin13") or obj.get("gtin") or obj.get("gtin14") or obj.get("gtin12")
-            return str(g) == str(ean)
-
-        if isinstance(data, list):
-            if any(has_gtin(x) for x in data):
-                return True
+        if barcode:
+            log.info(f"[COTO] barcode={barcode} limit={limit}")
+            return await asyncio.to_thread(_search_coto_by_barcode_sync, str(barcode), limit)
         else:
-            if has_gtin(data):
-                return True
-    
-    try:
-        html = await page.content()
-    except Exception:
-        html = ""
-    
-    if html and re.search(rf"\b{re.escape(str(ean))}\b", html):
-        return True
-
-    return False
-
-DEFAULT_CTX = {
-    "locale": "es-AR",
-    "user_agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-    ),
-    "viewport": {"width": 1366, "height": 800},
-}
-
-
-async def search_coto(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
-    print(f"[#EAN TASK 2 COTO] -------------> q={q}")
-    return await coto_search(q=q, limit=limit)
-
-async def search_coto_barcode(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
-    print(f"[#EAN TASK 2 COTO] -------------> barcode={barcode}")
-    return await coto_search_barcode(barcode=barcode, limit=limit)
+            log.info(f"[COTO] q={q} limit={limit}")
+            return await asyncio.to_thread(_search_coto_requests_sync, q, limit)
+    except Exception as e:
+        log.exception(f"[COTO][ERROR] q={q} barcode={barcode} limit={limit} -> {type(e).__name__}: {e}")
+        # En caso de error, devolvemos lista vacía para no romper el /search/all
+        return []
