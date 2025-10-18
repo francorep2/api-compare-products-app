@@ -1,11 +1,11 @@
-# scrapers/coto_requests.py
 from __future__ import annotations
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import re, json, html, unicodedata, time, logging
 import urllib.parse as _url
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+
+# 👇 cambio clave: fingerprint de Chrome (HTTP/2, JA3 real)
+from curl_cffi import requests as crequests
+from curl_cffi.requests import Session
 
 log = logging.getLogger("scraper.coto")
 if not log.handlers:
@@ -18,13 +18,19 @@ COTO_BASE = "https://www.cotodigital.com.ar"
 COTO_STATIC_HOST = "https://static.cotodigital3.com.ar"
 COTO_SUCURSAL_ID = 200
 
-_DEFAULT_TIMEOUT = 10
+_DEFAULT_TIMEOUT = 12
+
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 )
 
-_SESSION = requests.Session()
+# Fingerprint Chrome + HTTP/2
+_SESSION: Session = crequests.Session(
+    impersonate="chrome",  # 🎯 la clave para pasar WAF sin browser
+    timeout=_DEFAULT_TIMEOUT,
+    http2=True,
+)
 _SESSION.headers.update(
     {
         "User-Agent": _UA,
@@ -33,12 +39,9 @@ _SESSION.headers.update(
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
         "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
     }
 )
-# Retries básicos
-retry = Retry(total=2, backoff_factor=0.4, status_forcelist=(429, 500, 502, 503, 504))
-_SESSION.mount("https://", HTTPAdapter(max_retries=retry))
-_SESSION.mount("http://", HTTPAdapter(max_retries=retry))
 
 try:
     from scrapers._utils_promos import PROMO_NORMALIZER as _PROMO_NORMALIZER
@@ -63,27 +66,22 @@ def _title_seems_related(title: str, q: str) -> bool:
 # ===================== Red / cookies =====================
 
 def _bootstrap_cookies():
-    """
-    Coto necesita sucursal seteada para devolver resultados consistentes.
-    Pegamos a home con idSucursal para que el servidor nos deje cookies.
-    """
+    """Setea sucursal en cookie y calienta sesión con fingerprint 'chrome'."""
     try:
-        url = f"{COTO_BASE}/sitios/cdigi/home"
-        _SESSION.get(url, params={"idSucursal": str(COTO_SUCURSAL_ID), "Dy": "1"}, timeout=_DEFAULT_TIMEOUT)
-        # cookie defensiva
+        home = f"{COTO_BASE}/sitios/cdigi/home"
+        _SESSION.get(home, params={"idSucursal": str(COTO_SUCURSAL_ID), "Dy": "1"})
+        # asegura cookie en ambos dominios
         _SESSION.cookies.set("idSucursal", str(COTO_SUCURSAL_ID), domain="www.cotodigital.com.ar")
         _SESSION.cookies.set("idSucursal", str(COTO_SUCURSAL_ID), domain="cotodigital.com.ar")
     except Exception as e:
-        log.warning(f"[COTO] fallo bootstrap cookies: {e!r}")
+        log.warning(f"[COTO] bootstrap cookies falló: {e!r}")
 
-def _get(url: str, *, params: Optional[dict] = None, timeout: int = _DEFAULT_TIMEOUT) -> str:
-    r = _SESSION.get(url, params=params, timeout=timeout)
-    r.raise_for_status()
-    return r.text
+def _get(url: str, *, params: Optional[dict] = None) -> Tuple[str, int]:
+    r = _SESSION.get(url, params=params)
+    return r.text, r.status_code
 
 # ===================== Extractores =====================
 
-# Variantes comunes donde los sitios guardan el estado
 _PRELOADED_RES = [
     re.compile(r"__PRELOADED_STATE__\s*=\s*(\{.*?\})\s*;?\s*</script>", re.DOTALL | re.IGNORECASE),
     re.compile(r"preloadedState\s*=\s*(\{.*?\})\s*;?\s*</script>", re.DOTALL | re.IGNORECASE),
@@ -102,7 +100,6 @@ def _extract_preloaded_state(html_text: str) -> Optional[dict]:
         if not m:
             continue
         raw = html.unescape(m.group(1))
-        # arregla comas colgantes
         raw2 = re.sub(r",\s*}", "}", raw)
         raw2 = re.sub(r",\s*]", "]", raw2)
         try:
@@ -124,14 +121,12 @@ def _extract_ldjson_products(html_text: str) -> List[dict]:
                 out.append(obj)
     return out
 
-# Fallback por HTML: agarra tarjetas básicas
 _CARD_RE = re.compile(
     r'<a[^>]*href="(?P<href>/sitios/cdigi/productos/[^"]+)"[^>]*>(?P<inner>.*?)</a>',
     re.DOTALL | re.IGNORECASE,
 )
 _TITLE_RE = re.compile(r'(?:title="([^"]+)")|(?:alt="([^"]+)")', re.IGNORECASE)
 _IMG_RE = re.compile(r'<img[^>]+src="([^"]+)"', re.IGNORECASE)
-# Busca precios como 1.234,56 o 1234.56; prefijo opcional $ o ARS
 _PRICE_RE = re.compile(r'(?:\$|ARS)?\s*([0-9]{1,3}(?:[\.\s][0-9]{3})*(?:,[0-9]{2})|[0-9]+(?:\.[0-9]{2}))')
 
 def _parse_cards_html(html_text: str) -> List[dict]:
@@ -139,38 +134,26 @@ def _parse_cards_html(html_text: str) -> List[dict]:
     for m in _CARD_RE.finditer(html_text):
         href = m.group("href")
         inner = m.group("inner") or ""
-        # título
-        title = None
         tmatch = _TITLE_RE.search(inner)
-        if tmatch:
-            title = tmatch.group(1) or tmatch.group(2)
+        title = (tmatch.group(1) or tmatch.group(2)) if tmatch else None
         if not title:
-            # fallback: texto entre etiquetas
             txt = re.sub(r"<[^>]+>", " ", inner)
             txt = re.sub(r"\s+", " ", txt).strip()
             title = txt[:120] or "Producto Coto"
-
-        # imagen
-        img = ""
         im = _IMG_RE.search(inner)
-        if im:
-            img = im.group(1)
-
-        # precio
-        price_val = None
+        img = im.group(1) if im else ""
         pm = _PRICE_RE.search(inner)
-        if pm:
-            price_val = pm.group(1)
-
-        item = {
-            "title": title.strip(),
-            "price": f"ARS {price_val}".replace("  ", " ") if price_val else "ARS 0.00",
-            "url": _abs_url(href),
-            "image_url": _img_url_from_rel(img),
-            "barcode": None,
-            "promotion": None,
-        }
-        items.append(item)
+        price_val = pm.group(1) if pm else None
+        items.append(
+            {
+                "title": title.strip(),
+                "price": f"ARS {price_val}".replace("  ", " ") if price_val else "ARS 0.00",
+                "url": _abs_url(href),
+                "image_url": _img_url_from_rel(img),
+                "barcode": None,
+                "promotion": None,
+            }
+        )
     return items
 
 def _price_to_ars_string(p: Optional[float | int | str]) -> Optional[str]:
@@ -311,15 +294,41 @@ def _parse_search_page(html_text: str, q: str) -> List[dict]:
             seen[u] = it
     return list(seen.values())
 
+def _maybe_enrich_barcode_from_pdp(item: dict) -> dict:
+    """Si no tiene barcode, abre la PDP y lo intenta sacar del JSON-LD (rápido)."""
+    if item.get("barcode") or not item.get("url"):
+        return item
+    try:
+        html_text, _ = _get(item["url"])
+        for obj in _extract_ldjson_products(html_text):
+            gtin = obj.get("gtin13") or obj.get("gtin") or obj.get("gtin14") or obj.get("gtin12")
+            if gtin:
+                item["barcode"] = str(gtin)
+                break
+        return item
+    except Exception:
+        return item
+
 def search_coto_requests(q: str, limit: int = TOP_N) -> List[Dict]:
     _bootstrap_cookies()
     url = _build_search_url(q)
-    html_text = _get(url)
-    # quick guard contra bloqueos
-    if "Access Denied" in html_text or "verificá que sos humano" in html_text.lower():
+    html_text, status = _get(url)
+
+    # logs mínimos para diagnóstico
+    if status >= 400:
+        log.warning(f"[COTO] HTTP {status} en búsqueda")
+    if "Access Denied" in html_text or "captcha" in html_text.lower():
         log.warning("[COTO] posible bloqueo / captcha")
         return []
+
     items = _parse_search_page(html_text, q)
+
+    # Si no hay nada, intentar un plan B: buscar "Coca Cola" suele tener PDPs claras
+    if not items:
+        log.info(f"[COTO] 0 items en búsqueda. url={url} len={len(html_text)}")
+    else:
+        # enriquecer rápido el top-1 con barcode si falta (no abre más de 1 PDP)
+        items[0] = _maybe_enrich_barcode_from_pdp(items[0])
 
     qn = _norm_text(q)
     def _score(it: dict) -> tuple:
@@ -331,7 +340,7 @@ def search_coto_requests(q: str, limit: int = TOP_N) -> List[Dict]:
     return items[:limit]
 
 def search_coto_by_barcode(barcode: str, limit: int = TOP_N) -> List[Dict]:
-    # usamos la misma búsqueda por Ntt=barcode
+    # usar Ntt por ean y luego enriquecer top-1 si es necesario
     items = search_coto_requests(str(barcode), limit=limit)
     bn = str(barcode)
     def _score(it: dict) -> tuple:
@@ -339,5 +348,8 @@ def search_coto_by_barcode(barcode: str, limit: int = TOP_N) -> List[Dict]:
         exact = (bn == (it.get("barcode") or "")) or (bn in (it.get("url") or ""))
         return (exact, bn in t, -len(t))
     items.sort(key=_score, reverse=True)
+
+    if items and (not items[0].get("barcode") or bn not in (items[0].get("barcode") or "")):
+        items[0] = _maybe_enrich_barcode_from_pdp(items[0])
     return items[:limit]
 
