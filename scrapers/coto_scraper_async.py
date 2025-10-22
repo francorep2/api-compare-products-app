@@ -18,7 +18,12 @@ COTO_BASE = "https://www.cotodigital.com.ar"
 COTO_STATIC_HOST = "https://static.cotodigital3.com.ar"
 COTO_SUCURSAL_ID = 200
 
-_DEFAULT_TIMEOUT = 12
+# Fast mode knobs
+FAST_MODE_DEFAULT = True          # evita bootstrap salvo que falle
+TEXT_ONLY_DEFAULT = True          # no resolvemos ni buscamos imágenes
+ENRICH_BARCODE_DEFAULT = False    # no abrimos PDP salvo pedido explícito
+
+_DEFAULT_TIMEOUT = 9  # bajamos timeout por request; total debe quedar < 12s
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -37,7 +42,10 @@ _SESSION.headers.update(
         "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
-        "Connection": "keep-alive",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
         "Upgrade-Insecure-Requests": "1",
     }
 )
@@ -65,7 +73,7 @@ def _title_seems_related(title: str, q: str) -> bool:
 # ===================== Red / cookies =====================
 
 def _bootstrap_cookies():
-    """Setea sucursal en cookie y calienta sesión con fingerprint 'chrome'."""
+    """Setea sucursal en cookie. Se evita en FAST_MODE para ahorrar 1 request."""
     try:
         home = f"{COTO_BASE}/sitios/cdigi/home"
         _SESSION.get(home, params={"idSucursal": str(COTO_SUCURSAL_ID), "Dy": "1"})
@@ -75,8 +83,8 @@ def _bootstrap_cookies():
     except Exception as e:
         log.warning(f"[COTO] bootstrap cookies falló: {e!r}")
 
-def _get(url: str, *, params: Optional[dict] = None) -> Tuple[str, int]:
-    r = _SESSION.get(url, params=params)
+def _get(url: str, *, params: Optional[dict] = None, timeout: Optional[float] = None) -> Tuple[str, int]:
+    r = _SESSION.get(url, params=params, timeout=timeout or _DEFAULT_TIMEOUT)
     return r.text, r.status_code
 
 # ===================== Extractores =====================
@@ -128,7 +136,7 @@ _TITLE_RE = re.compile(r'(?:title="([^"]+)")|(?:alt="([^"]+)")', re.IGNORECASE)
 _IMG_RE = re.compile(r'<img[^>]+src="([^"]+)"', re.IGNORECASE)
 _PRICE_RE = re.compile(r'(?:\$|ARS)?\s*([0-9]{1,3}(?:[\.\s][0-9]{3})*(?:,[0-9]{2})|[0-9]+(?:\.[0-9]{2}))')
 
-def _parse_cards_html(html_text: str) -> List[dict]:
+def _parse_cards_html(html_text: str, limit: int, text_only: bool = TEXT_ONLY_DEFAULT) -> List[dict]:
     items: List[dict] = []
     for m in _CARD_RE.finditer(html_text):
         href = m.group("href")
@@ -139,8 +147,10 @@ def _parse_cards_html(html_text: str) -> List[dict]:
             txt = re.sub(r"<[^>]+>", " ", inner)
             txt = re.sub(r"\s+", " ", txt).strip()
             title = txt[:120] or "Producto Coto"
-        im = _IMG_RE.search(inner)
-        img = im.group(1) if im else ""
+        img = ""
+        if not text_only:
+            im = _IMG_RE.search(inner)
+            img = im.group(1) if im else ""
         pm = _PRICE_RE.search(inner)
         price_val = pm.group(1) if pm else None
         items.append(
@@ -148,11 +158,13 @@ def _parse_cards_html(html_text: str) -> List[dict]:
                 "title": title.strip(),
                 "price": f"ARS {price_val}".replace("  ", " ") if price_val else "ARS 0.00",
                 "url": _abs_url(href),
-                "image_url": _img_url_from_rel(img),
+                "image_url": _img_url_from_rel(img) if img else "",
                 "barcode": None,
                 "promotion": None,
             }
         )
+        if len(items) >= limit:
+            break
     return items
 
 def _price_to_ars_string(p: Optional[float | int | str]) -> Optional[str]:
@@ -188,12 +200,12 @@ def _img_url_from_rel(path: str) -> str:
 
 # ===================== Mapping =====================
 
-def _map_item_from_preloaded(product: dict) -> Optional[dict]:
+def _map_item_from_preloaded(product: dict, text_only: bool = TEXT_ONLY_DEFAULT) -> Optional[dict]:
     title = product.get("displayName") or product.get("name") or product.get("title")
     if not title:
         return None
     url = product.get("url") or product.get("pdpUrl") or product.get("link") or product.get("productUrl") or ""
-    img = product.get("imageUrl") or product.get("image") or product.get("mainImage") or product.get("thumbnail") or ""
+    img = "" if text_only else (product.get("imageUrl") or product.get("image") or product.get("mainImage") or product.get("thumbnail") or "")
     price = (
         product.get("price")
         or product.get("priceDecimal")
@@ -209,12 +221,12 @@ def _map_item_from_preloaded(product: dict) -> Optional[dict]:
         "title": title.strip(),
         "price": _price_to_ars_string(price) or "ARS 0.00",
         "url": _abs_url(url),
-        "image_url": _img_url_from_rel(img),
+        "image_url": _img_url_from_rel(img) if img else "",
         "barcode": str(barcode) if barcode else None,
         "promotion": _PROMO_NORMALIZER(str(promo_raw)) if promo_raw else None,
     }
 
-def _map_item_from_ldjson(obj: dict) -> Optional[dict]:
+def _map_item_from_ldjson(obj: dict, text_only: bool = TEXT_ONLY_DEFAULT) -> Optional[dict]:
     title = obj.get("name") or obj.get("title")
     if not title:
         return None
@@ -224,7 +236,7 @@ def _map_item_from_ldjson(obj: dict) -> Optional[dict]:
         price = offers.get("price")
     elif isinstance(offers, list) and offers:
         price = offers[0].get("price")
-    image = obj.get("image")
+    image = "" if text_only else obj.get("image")
     if isinstance(image, list):
         image = image[0] if image else None
     url = obj.get("url") or ""
@@ -232,7 +244,7 @@ def _map_item_from_ldjson(obj: dict) -> Optional[dict]:
         "title": title.strip(),
         "price": _price_to_ars_string(price) or "ARS 0.00",
         "url": _abs_url(url),
-        "image_url": _img_url_from_rel(image or ""),
+        "image_url": _img_url_from_rel(image or "") if image else "",
         "barcode": obj.get("gtin13") or obj.get("gtin") or None,
         "promotion": None,
     }
@@ -240,10 +252,10 @@ def _map_item_from_ldjson(obj: dict) -> Optional[dict]:
 # ===================== Search =====================
 
 def _build_search_url(q: str) -> str:
-    params = {"Ntt": q, "idSucursal": str(COTO_SUCURSAL_ID), "Dy": "1"}
+    params = {"Ntt": q, "idSucursal": str(COTO_SUCURSAL_ID), "Dy": "1", "Nrpp": "12"}
     return f"{COTO_BASE}/sitios/cdigi/busqueda?{_url.urlencode(params)}"
 
-def _parse_search_page(html_text: str, q: str) -> List[dict]:
+def _parse_search_page(html_text: str, q: str, limit: int, text_only: bool = TEXT_ONLY_DEFAULT) -> List[dict]:
     items: List[dict] = []
 
     # 1) PRELOADED STATE
@@ -268,37 +280,47 @@ def _parse_search_page(html_text: str, q: str) -> List[dict]:
                 candidates = cur
                 break
         for p in candidates:
-            mapped = _map_item_from_preloaded(p)
+            mapped = _map_item_from_preloaded(p, text_only=text_only)
             if mapped and _title_seems_related(mapped["title"], q):
                 items.append(mapped)
+                if len(items) >= limit:
+                    return items
 
     # 2) JSON-LD fallback
-    if not items:
+    if len(items) < limit:
         for obj in _extract_ldjson_products(html_text):
-            mapped = _map_item_from_ldjson(obj)
+            mapped = _map_item_from_ldjson(obj, text_only=text_only)
             if mapped and _title_seems_related(mapped["title"], q):
                 items.append(mapped)
+                if len(items) >= limit:
+                    return items
 
     # 3) HTML cards fallback
-    if not items:
-        for it in _parse_cards_html(html_text):
+    if len(items) < limit:
+        for it in _parse_cards_html(html_text, limit=limit - len(items), text_only=text_only):
             if _title_seems_related(it["title"], q):
                 items.append(it)
+                if len(items) >= limit:
+                    break
 
     # de-dup por URL
     seen: Dict[str, dict] = {}
+    out: List[dict] = []
     for it in items:
         u = it.get("url") or ""
         if u and u not in seen:
             seen[u] = it
-    return list(seen.values())
+            out.append(it)
+            if len(out) >= limit:
+                break
+    return out
 
-def _maybe_enrich_barcode_from_pdp(item: dict) -> dict:
+def _maybe_enrich_barcode_from_pdp(item: dict, timeout: Optional[float] = None) -> dict:
     """Si no tiene barcode, abre la PDP y lo intenta sacar del JSON-LD (rápido)."""
     if item.get("barcode") or not item.get("url"):
         return item
     try:
-        html_text, _ = _get(item["url"])
+        html_text, _ = _get(item["url"], timeout=timeout)
         for obj in _extract_ldjson_products(html_text):
             gtin = obj.get("gtin13") or obj.get("gtin") or obj.get("gtin14") or obj.get("gtin12")
             if gtin:
@@ -308,27 +330,35 @@ def _maybe_enrich_barcode_from_pdp(item: dict) -> dict:
     except Exception:
         return item
 
-def search_coto_requests(q: str, limit: int = TOP_N) -> List[Dict]:
-    _bootstrap_cookies()
-    url = _build_search_url(q)
-    html_text, status = _get(url)
+def search_coto_requests(q: str, limit: int = TOP_N, *, fast: bool = FAST_MODE_DEFAULT, text_only: bool = TEXT_ONLY_DEFAULT, enrich_barcode: bool = ENRICH_BARCODE_DEFAULT) -> List[Dict]:
+    def _one_search(skip_bootstrap: bool) -> Tuple[List[Dict], str, int]:
+        if not skip_bootstrap:
+            _bootstrap_cookies()
+        url = _build_search_url(q)
+        html_text, status = _get(url)
+        items = _parse_search_page(html_text, q, limit=limit, text_only=text_only)
+        return items, html_text, status
 
-    # logs mínimos para diagnóstico
-    if status >= 400:
-        log.warning(f"[COTO] HTTP {status} en búsqueda")
-    if "Access Denied" in html_text or "captcha" in html_text.lower():
-        log.warning("[COTO] posible bloqueo / captcha")
-        return []
+    # FAST: intenta sin bootstrap primero
+    items, html_text, status = _one_search(skip_bootstrap=fast)
 
-    items = _parse_search_page(html_text, q)
+    blocked = ("Access Denied" in html_text) or ("captcha" in html_text.lower())
+    if status >= 400 or blocked:
+        log.warning(f"[COTO] status={status} blocked={blocked}")
+        items = []
 
-    # Si no hay nada, intentar un plan B: buscar "Coca Cola" suele tener PDPs claras
+    # Si vacío y veníamos en FAST, reintenta con bootstrap
+    if not items and fast:
+        items, html_text, status = _one_search(skip_bootstrap=False)
+
     if not items:
-        log.info(f"[COTO] 0 items en búsqueda. url={url} len={len(html_text)}")
-    else:
-        # enriquecer rápido el top-1 con barcode si falta (no abre más de 1 PDP)
-        items[0] = _maybe_enrich_barcode_from_pdp(items[0])
+        log.info(f"[COTO] 0 items en búsqueda. len={len(html_text)}")
 
+    # opcional: enriquecer solo si se pide
+    if enrich_barcode and items:
+        items[0] = _maybe_enrich_barcode_from_pdp(items[0], timeout=min(_DEFAULT_TIMEOUT, 5))
+
+    # ranking simple
     qn = _norm_text(q)
     def _score(it: dict) -> tuple:
         t = _norm_text(it["title"])
@@ -338,17 +368,14 @@ def search_coto_requests(q: str, limit: int = TOP_N) -> List[Dict]:
     items.sort(key=_score, reverse=True)
     return items[:limit]
 
-def search_coto_by_barcode(barcode: str, limit: int = TOP_N) -> List[Dict]:
-    # usar Ntt por ean y luego enriquecer top-1 si es necesario
-    items = search_coto_requests(str(barcode), limit=limit)
+def search_coto_by_barcode(barcode: str, limit: int = TOP_N, *, fast: bool = FAST_MODE_DEFAULT, text_only: bool = TEXT_ONLY_DEFAULT, enrich_barcode: bool = ENRICH_BARCODE_DEFAULT) -> List[Dict]:
+    items = search_coto_requests(str(barcode), limit=limit, fast=fast, text_only=text_only, enrich_barcode=False)
     bn = str(barcode)
     def _score(it: dict) -> tuple:
         t = _norm_text(it["title"])
         exact = (bn == (it.get("barcode") or "")) or (bn in (it.get("url") or ""))
         return (exact, bn in t, -len(t))
     items.sort(key=_score, reverse=True)
-
-    if items and (not items[0].get("barcode") or bn not in (items[0].get("barcode") or "")):
-        items[0] = _maybe_enrich_barcode_from_pdp(items[0])
+    if enrich_barcode and items and (not items[0].get("barcode") or bn not in (items[0].get("barcode") or "")):
+        items[0] = _maybe_enrich_barcode_from_pdp(items[0], timeout=min(_DEFAULT_TIMEOUT, 5))
     return items[:limit]
-
