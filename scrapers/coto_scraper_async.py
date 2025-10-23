@@ -49,7 +49,10 @@ def _build_session():
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "same-origin",
         "Sec-Fetch-User": "?1",
-        "Referer": f"{COTO_BASE}/sitios/cdigi/busqueda?idSucursal={COTO_SUCURSAL_ID}&Dy=1",
+        "Referer": f"{COTO_BASE}/sitios/cdigi/nuevositio",
+        "sec-ch-ua": '"Google Chrome";v="120", "Chromium";v="120", "Not-A.Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
     })
     # Cookie de sucursal (reduce bloqueos)
     s.cookies.set("idSucursal", str(COTO_SUCURSAL_ID), domain="www.cotodigital.com.ar")
@@ -64,7 +67,7 @@ def _bootstrap_cookies(s) -> bool:
     No analiza el body; sólo interesa que responda 200.
     """
     try:
-        url = f"{COTO_BASE}/sitios/cdigi/home?idSucursal={COTO_SUCURSAL_ID}&Dy=1"
+        url = f"{COTO_BASE}/sitios/cdigi/nuevositio"
         r = s.get(url, timeout=DEFAULT_TIMEOUT)
         return (getattr(r, "status_code", None) or getattr(r, "status", 0)) < 400
     except Exception:
@@ -72,12 +75,12 @@ def _bootstrap_cookies(s) -> bool:
 
 def _build_search_url(q: str, nrpp: int = 12) -> str:
     params = {
+        "_dyncharset": "utf-8",
+        "Dy": "1",
         "Ntt": q,
         "idSucursal": str(COTO_SUCURSAL_ID),
-        "Dy": "1",
-        "Nrpp": str(nrpp),  # pocos ítems para bajar poco HTML
     }
-    return f"{COTO_BASE}/sitios/cdigi/busqueda?{_url.urlencode(params)}"
+    return f"{COTO_BASE}/sitios/cdigi/categoria?{_url.urlencode(params)}"
 
 # ---------- Parsers: devolvemos SOLO títulos ----------
 
@@ -225,6 +228,9 @@ def search_coto_requests(query: str, limit: int = 10, nrpp: int = 12) -> list[st
     # 1) sesión primaria
     s = _build_session()
 
+    # Bootstrap cookies SIEMPRE antes del primer intento (evita 401)
+    _bootstrap_cookies(s)
+
     def _one_search(session) -> tuple[list[str], str, int]:
         url = _build_search_url(query, nrpp=nrpp)
         try:
@@ -245,35 +251,51 @@ def search_coto_requests(query: str, limit: int = 10, nrpp: int = 12) -> list[st
             titles = _extract_html_titles_fallback(body, limit=limit)
         return titles[:limit], body, status
 
-    # FAST: intenta directo
+    # Primer intento con la sesión actual (curl_cffi o requests) ya bootstrapeada
     titles, body, status = _one_search(s)
     if titles:
         return titles[:limit]
-
-    # Si vacío o bloqueado/401/403/503, intentar bootstrap
-    if not titles:
-        _bootstrap_cookies(s)
-        titles, body, status = _one_search(s)
+    
+    # Segundo intento: si tenemos curl_cffi, probamos con requests “plain” (HTTP/1.1)
+    try:
+        import requests as _plain
+        s2 = _plain.Session()
+        s2.headers.update(s.headers)
+        # Asegurar Referer a home y cookies de sucursal
+        s2.headers["Referer"] = f"{COTO_BASE}/sitios/cdigi/home?idSucursal={COTO_SUCURSAL_ID}&Dy=1"
+        s2.cookies.set("idSucursal", str(COTO_SUCURSAL_ID), domain="www.cotodigital.com.ar")
+        s2.cookies.set("idSucursal", str(COTO_SUCURSAL_ID), domain="cotodigital.com.ar")
+        _bootstrap_cookies(s2)
+        titles, body, status = _one_search(s2)
         if titles:
             return titles[:limit]
-
-    # Fallback: si usamos curl_cffi, probar una sesión con requests estándar
-    if HAVE_CURL:
-        try:
-            import requests as _plain
-            s2 = _plain.Session()
-            s2.headers.update(s.headers)
-            # replicar cookies de sucursal
-            s2.cookies.set("idSucursal", str(COTO_SUCURSAL_ID), domain="www.cotodigital.com.ar")
-            s2.cookies.set("idSucursal", str(COTO_SUCURSAL_ID), domain="cotodigital.com.ar")
-            _bootstrap_cookies(s2)
-            titles, body, status = _one_search(s2)
-            if titles:
-                return titles[:limit]
-        except Exception:
-            pass
-
-    # sin resultados (probable captcha/WAF)
+    except Exception:
+        pass
+    
+    # Tercer intento: requests “plain” pero con headers mínimos (algunos WAF odian sec-ch-ua)
+    try:
+        import requests as _plain
+        s3 = _plain.Session()
+        s3.headers.update({
+            "User-Agent": UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "es-AR,es-419;q=0.9,es;q=0.8,en-US;q=0.7,en;q=0.6",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Upgrade-Insecure-Requests": "1",
+            "Referer": f"{COTO_BASE}/sitios/cdigi/home?idSucursal={COTO_SUCURSAL_ID}&Dy=1",
+        })
+        s3.cookies.set("idSucursal", str(COTO_SUCURSAL_ID), domain="www.cotodigital.com.ar")
+        s3.cookies.set("idSucursal", str(COTO_SUCURSAL_ID), domain="cotodigital.com.ar")
+        _bootstrap_cookies(s3)
+        titles, body, status = _one_search(s3)
+        if titles:
+            return titles[:limit]
+    except Exception:
+        pass
+    
+    # sin resultados (probable captcha/WAF duro)
     return []
 
 
