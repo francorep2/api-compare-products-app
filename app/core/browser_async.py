@@ -1,6 +1,5 @@
-# app/core/browser_async.py
 from contextlib import asynccontextmanager
-from playwright.async_api import async_playwright, Playwright, Browser
+from playwright.async_api import async_playwright
 
 DEFAULT_CTX = {
     "locale": "es-AR",
@@ -12,21 +11,14 @@ DEFAULT_CTX = {
 }
 
 class AsyncBrowserManager:
-    
     def __init__(self):
-        self._pw: Playwright | None = None
-        self._browser: Browser | None = None
-        
-   
-      
+        self._pw = None
+        self._browser = None
+
     async def startup(self, headless: bool = True):
         if self._pw is None:
             self._pw = await async_playwright().start()
-            # ← flags clave en Koyeb
-            self._browser = await self._pw.chromium.launch(
-                headless=headless,
-                args=["--no-sandbox", "--disable-dev-shm-usage"]
-            )
+            self._browser = await self._pw.chromium.launch(headless=headless)
 
     async def shutdown(self):
         if self._browser:
@@ -37,15 +29,16 @@ class AsyncBrowserManager:
         self._pw = None
 
     @asynccontextmanager
-    async def page(self):
-        # Auto-start
-        if self._browser is None:
-            await self.startup(headless=True)
-        ctx = await self._browser.new_context(**DEFAULT_CTX)
-        page = await ctx.new_page()
+    async def new_context(self, **ctx_overrides):
+        ctx = DEFAULT_CTX | ctx_overrides
+        context = await self._browser.new_context(
+            user_agent=ctx["user_agent"],
+            locale=ctx["locale"],
+            viewport=ctx["viewport"],
+        )
         try:
-            yield page
+            yield context
         finally:
-            await ctx.close()
+            await context.close()
 
 browser_manager_async = AsyncBrowserManager()
