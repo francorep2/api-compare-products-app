@@ -9,7 +9,7 @@ import html
 import unicodedata
 import logging
 import urllib.parse as _url
-
+from curl_cffi.requests.errors import RequestsError
 from curl_cffi import requests as crequests
 from curl_cffi.requests import Session
 
