@@ -42,11 +42,12 @@ def _build_session():
         "Accept-Encoding": "gzip, deflate, br",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
+        "DNT": "1",
         "Upgrade-Insecure-Requests": "1",
         # Hints similares a navegación real
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Site": "same-origin",
         "Sec-Fetch-User": "?1",
         "Referer": f"{COTO_BASE}/sitios/cdigi/busqueda?idSucursal={COTO_SUCURSAL_ID}&Dy=1",
     })
@@ -54,6 +55,20 @@ def _build_session():
     s.cookies.set("idSucursal", str(COTO_SUCURSAL_ID), domain="www.cotodigital.com.ar")
     s.cookies.set("idSucursal", str(COTO_SUCURSAL_ID), domain="cotodigital.com.ar")
     return s
+
+
+# Helper para bootstrapping de cookies
+def _bootstrap_cookies(s) -> bool:
+    """
+    Hace un GET a la home para que el sitio setee cookies adicionales (evita 401/Access Denied).
+    No analiza el body; sólo interesa que responda 200.
+    """
+    try:
+        url = f"{COTO_BASE}/sitios/cdigi/home?idSucursal={COTO_SUCURSAL_ID}&Dy=1"
+        r = s.get(url, timeout=DEFAULT_TIMEOUT)
+        return (getattr(r, "status_code", None) or getattr(r, "status", 0)) < 400
+    except Exception:
+        return False
 
 def _build_search_url(q: str, nrpp: int = 12) -> str:
     params = {
@@ -207,34 +222,59 @@ def _extract_html_titles_fallback(html_text: str, limit: int) -> list[str]:
 
 def search_coto_requests(query: str, limit: int = 10, nrpp: int = 12) -> list[str]:
     """Devuelve SOLO los títulos de productos para la búsqueda dada (lista[str])."""
-    # Si el sitio devuelve un captcha o 'Access Denied', retorna lista vacía.
+    # 1) sesión primaria
     s = _build_session()
-    url = _build_search_url(query, nrpp=nrpp)
-    try:
-        r = s.get(url, timeout=DEFAULT_TIMEOUT)
-        status = getattr(r, "status_code", None) or getattr(r, "status", 0)
-        text = r.text if hasattr(r, "text") else (r.content.decode("utf-8", "ignore"))
-    except Exception:
-        return []
 
-    body = text or ""
-    # bloqueado con 200
-    if ("Access Denied" in body) or ("captcha" in body.lower()):
-        return []
+    def _one_search(session) -> tuple[list[str], str, int]:
+        url = _build_search_url(query, nrpp=nrpp)
+        try:
+            r = session.get(url, timeout=DEFAULT_TIMEOUT)
+            status = getattr(r, "status_code", None) or getattr(r, "status", 0)
+            text = r.text if hasattr(r, "text") else (r.content.decode("utf-8", "ignore"))
+        except Exception:
+            return [], "", 0
+        body = text or ""
+        # bloqueado
+        blocked = ("Access Denied" in body) or ("captcha" in body.lower()) or (status >= 400)
+        if blocked:
+            return [], body, status
+        titles = _extract_preloaded_titles(body)
+        if not titles:
+            titles = _extract_ldjson_titles(body)
+        if not titles:
+            titles = _extract_html_titles_fallback(body, limit=limit)
+        return titles[:limit], body, status
 
-    # 1) preloaded state
-    titles = _extract_preloaded_titles(body)
+    # FAST: intenta directo
+    titles, body, status = _one_search(s)
     if titles:
         return titles[:limit]
 
-    # 2) JSON-LD
-    titles = _extract_ldjson_titles(body)
-    if titles:
-        return titles[:limit]
+    # Si vacío o bloqueado/401/403/503, intentar bootstrap
+    if not titles:
+        _bootstrap_cookies(s)
+        titles, body, status = _one_search(s)
+        if titles:
+            return titles[:limit]
 
-    # 3) HTML fallback
-    titles = _extract_html_titles_fallback(body, limit=limit)
-    return titles[:limit]
+    # Fallback: si usamos curl_cffi, probar una sesión con requests estándar
+    if HAVE_CURL:
+        try:
+            import requests as _plain
+            s2 = _plain.Session()
+            s2.headers.update(s.headers)
+            # replicar cookies de sucursal
+            s2.cookies.set("idSucursal", str(COTO_SUCURSAL_ID), domain="www.cotodigital.com.ar")
+            s2.cookies.set("idSucursal", str(COTO_SUCURSAL_ID), domain="cotodigital.com.ar")
+            _bootstrap_cookies(s2)
+            titles, body, status = _one_search(s2)
+            if titles:
+                return titles[:limit]
+        except Exception:
+            pass
+
+    # sin resultados (probable captcha/WAF)
+    return []
 
 
 __all__ = ["search_coto_requests"]
