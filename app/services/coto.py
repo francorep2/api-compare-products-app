@@ -3,7 +3,6 @@ from app.core.browser_async import browser_manager_async
 from scrapers.coto_scraper_async import search as coto_search
 import json, re
 
-# --- ESTA PARTE DE TU CÓDIGO ORIGINAL SE MANTIENE EXACTAMENTE IGUAL ---
 async def _json_parse_safe(txt: str):
     try:
         return json.loads(txt)

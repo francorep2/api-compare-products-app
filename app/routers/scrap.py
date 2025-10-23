@@ -21,9 +21,6 @@ from app.core.browser_async import browser_manager_async
 from fastapi import APIRouter, Query, HTTPException
 import asyncio
 
-from scrapers.coto_scraper_async import search_coto_requests
-
-
 router = APIRouter(prefix="/search", tags=["search"],dependencies=[Depends(get_current_user)],)
 
 VALID_STORES = {"coto","carrefour","dia","jumbo"}
