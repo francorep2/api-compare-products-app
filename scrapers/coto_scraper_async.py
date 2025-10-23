@@ -160,7 +160,7 @@ def _extract_html_titles_fallback(html_text: str, limit: int) -> list[str]:
 
 # ---------- API pública ----------
 
-def search_coto_request(query: str, limit: int = 10, nrpp: int = 12) -> list[str]:
+def search_coto_requests(query: str, limit: int = 10, nrpp: int = 12) -> list[str]:
     """
     Devuelve SOLO los títulos de productos para la búsqueda dada.
     Si el sitio devuelve un captcha o 'Access Denied', retorna lista vacía.
