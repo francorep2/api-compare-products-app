@@ -11,6 +11,7 @@ Scraper simple de Coto Digital: devuelve SOLO los títulos de producto para una 
 from __future__ import annotations
 import re, json, html, os
 import urllib.parse as _url
+import codecs
 
 # ---- HTTP backend (curl_cffi si existe, sino requests) ----
 try:
@@ -45,7 +46,7 @@ def _build_session():
         # Hints similares a navegación real
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Site": "none",
         "Sec-Fetch-User": "?1",
         "Referer": f"{COTO_BASE}/sitios/cdigi/busqueda?idSucursal={COTO_SUCURSAL_ID}&Dy=1",
     })
@@ -70,23 +71,19 @@ _LDJSON_RE    = re.compile(r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)<
 _CARD_TITLE_RE = re.compile(r'title="([^"]+)"')
 _H_TAG_RE      = re.compile(r"<h[1-6][^>]*>(.*?)</h[1-6]>", re.S)
 
-def _extract_preloaded_titles(html_text: str) -> list[str]:
-    m = _PRELOADED_RE.search(html_text)
-    if not m:
-        return []
-    try:
-        raw = html.unescape(m.group(1))
-        data = json.loads(raw)
-    except Exception:
-        return []
-    # rutas comunes hacia products/productos
+_PRELOADED_JSONPARSE_RE = re.compile(r"__PRELOADED_STATE__\s*=\s*JSON\.parse\('(.*?)'\)\s*;?", re.S)
+_DISPLAYNAME_RE = re.compile(r'"displayName"\s*:\s*"([^"]+)"')
+_GENERIC_NAME_RE = re.compile(r'class="[^"]*(?:product-name|product__name|item-name)[^"]*"[^>]*>(.*?)<', re.S|re.I)
+_DATA_NAME_ATTR_RE = re.compile(r'data-name="([^"]+)"', re.I)
+
+def _extract_titles_from_state_obj(data: dict) -> list[str]:
     paths = [
         ["search", "results", "products"],
         ["results", "products"],
         ["search", "products"],
         ["products"],
     ]
-    titles: list[str] = []
+    out: list[str] = []
     for path in paths:
         cur = data
         ok = True
@@ -98,16 +95,41 @@ def _extract_preloaded_titles(html_text: str) -> list[str]:
                 break
         if ok and isinstance(cur, list):
             for p in cur:
-                t = (
-                    (p or {}).get("displayName")
-                    or (p or {}).get("name")
-                    or (p or {}).get("title")
-                )
+                t = (p or {}).get("displayName") or (p or {}).get("name") or (p or {}).get("title")
                 if t:
-                    titles.append(str(t).strip())
-            if titles:
+                    out.append(str(t).strip())
+            if out:
                 break
-    return titles
+    return out
+
+def _extract_preloaded_titles(html_text: str) -> list[str]:
+    # 1) window.__PRELOADED_STATE__ = {...};
+    m = _PRELOADED_RE.search(html_text)
+    if m:
+        try:
+            raw = html.unescape(m.group(1))
+            data = json.loads(raw)
+            titles = _extract_titles_from_state_obj(data)
+            if titles:
+                return titles
+        except Exception:
+            pass
+    # 2) window.__PRELOADED_STATE__ = JSON.parse('...json...');
+    m2 = _PRELOADED_JSONPARSE_RE.search(html_text)
+    if m2:
+        try:
+            raw = m2.group(1)
+            # des-escape de JSON.parse string literal
+            raw = raw.encode("utf-8").decode("unicode_escape")
+            data = json.loads(raw)
+            titles = _extract_titles_from_state_obj(data)
+            if titles:
+                return titles
+        except Exception:
+            pass
+    # 3) fallback: rastrillar displayName plano en el HTML
+    brute = _DISPLAYNAME_RE.findall(html_text)[:50]
+    return [t.strip() for t in brute if t and isinstance(t, str)]
 
 def _extract_ldjson_titles(html_text: str) -> list[str]:
     out: list[str] = []
@@ -141,14 +163,14 @@ def _collect_ldjson_titles_from_obj(obj: dict, out: list[str]):
 
 def _extract_html_titles_fallback(html_text: str, limit: int) -> list[str]:
     titles: list[str] = []
-    # primero intentar atributos title=""
+    # 1) atributos title=""
     for m in _CARD_TITLE_RE.finditer(html_text):
         t = m.group(1)
         if t:
             titles.append(t.strip())
             if len(titles) >= limit:
                 return titles
-    # luego, etiquetas hN
+    # 2) etiquetas hN
     for m in _H_TAG_RE.finditer(html_text):
         t = re.sub(r"<[^>]+>", " ", m.group(1) or "")
         t = re.sub(r"\s+", " ", t).strip()
@@ -156,15 +178,36 @@ def _extract_html_titles_fallback(html_text: str, limit: int) -> list[str]:
             titles.append(t)
             if len(titles) >= limit:
                 return titles
+    # 3) nombres genéricos por clase
+    for m in _GENERIC_NAME_RE.finditer(html_text):
+        t = re.sub(r"<[^>]+>", " ", m.group(1) or "")
+        t = re.sub(r"\s+", " ", t).strip()
+        if t:
+            titles.append(t)
+            if len(titles) >= limit:
+                return titles
+    # 4) data-name=""
+    for m in _DATA_NAME_ATTR_RE.finditer(html_text):
+        t = m.group(1)
+        if t:
+            titles.append(t.strip())
+            if len(titles) >= limit:
+                return titles
+    # 5) último recurso: buscar "name":"..." aislado (peligro de falsos positivos)
+    naive = re.findall(r'"name"\s*:\s*"([^"]+)"', html_text)[:limit*2]
+    for t in naive:
+        t = t.strip()
+        if t and t not in titles:
+            titles.append(t)
+            if len(titles) >= limit:
+                break
     return titles[:limit]
 
 # ---------- API pública ----------
 
 def search_coto_requests(query: str, limit: int = 10, nrpp: int = 12) -> list[str]:
-    """
-    Devuelve SOLO los títulos de productos para la búsqueda dada.
-    Si el sitio devuelve un captcha o 'Access Denied', retorna lista vacía.
-    """
+    """Devuelve SOLO los títulos de productos para la búsqueda dada (lista[str])."""
+    # Si el sitio devuelve un captcha o 'Access Denied', retorna lista vacía.
     s = _build_session()
     url = _build_search_url(query, nrpp=nrpp)
     try:
@@ -193,3 +236,5 @@ def search_coto_requests(query: str, limit: int = 10, nrpp: int = 12) -> list[st
     titles = _extract_html_titles_fallback(body, limit=limit)
     return titles[:limit]
 
+
+__all__ = ["search_coto_requests"]
