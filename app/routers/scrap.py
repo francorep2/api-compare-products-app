@@ -21,6 +21,8 @@ from app.core.browser_async import browser_manager_async
 from fastapi import APIRouter, Query, HTTPException
 import asyncio
 
+from scrapers.coto_scraper_async import search_coto_requests
+
 
 router = APIRouter(prefix="/search", tags=["search"],dependencies=[Depends(get_current_user)],)
 
@@ -49,20 +51,9 @@ def _enabled_stores_from_prefs(prefs) -> List[str]:
     if getattr(prefs, "include_dia", True):        cand.append("dia")
     return cand
 
-@router.get("/coto")
-async def search_coto_endpoint(
-    q: str | None = Query(None),
-    limit: int = Query(3, ge=1, le=10),
-):
-    try:
-        items = await asyncio.wait_for(
-            search_coto(q=q, limit=limit),
-            timeout=REQUEST_BUDGET_SEC,  # ≤ 13s recomendado en Koyeb Free
-        )
-        return {"results": items}
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Coto tardó demasiado en responder (modo rápido).")
-
+@app.get("/coto")
+def search_coto(q: str, limit: int = 10):
+    return {"results": search_coto_requests(q, limit=limit)}
 
 @router.get("/carrefour")
 async def search_carrefour_endpoint(
