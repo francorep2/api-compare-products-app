@@ -51,7 +51,7 @@ def _enabled_stores_from_prefs(prefs) -> List[str]:
     if getattr(prefs, "include_dia", True):        cand.append("dia")
     return cand
 
-@app.get("/coto")
+@router.get("/coto")
 def search_coto(q: str, limit: int = 10):
     return {"results": search_coto_requests(q, limit=limit)}
 
