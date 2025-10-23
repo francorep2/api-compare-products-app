@@ -59,7 +59,6 @@ async def search_barcode_all(
     enabled_set = set(_split_csv(enabled) or ALLOWED)
 
     initial_tasks = {
-        "coto_direct": _task(search_coto, ctx, barcode=barcode, limit=limit) if "coto" in enabled_set else asyncio.sleep(0, result=[]),
         "name_carrefour": _task(resolve_name_carrefour, barcode) if "carrefour" in enabled_set else asyncio.sleep(0, result=None),
         "name_dia": _task(resolve_name_dia, barcode) if "dia" in enabled_set else asyncio.sleep(0, result=None),
         "name_jumbo": _task(resolve_name_jumbo, barcode) if "jumbo" in enabled_set else asyncio.sleep(0, result=None),
@@ -69,7 +68,6 @@ async def search_barcode_all(
 
     def _safe(r): return [] if isinstance(r, Exception) else (r or [])
 
-    coto_items = _safe(initial_map.get("coto_direct"))
     name_carrefour = initial_map.get("name_carrefour") if not isinstance(initial_map.get("name_carrefour"), Exception) else None
     name_dia = initial_map.get("name_dia") if not isinstance(initial_map.get("name_dia"), Exception) else None
     name_jumbo = initial_map.get("name_jumbo") if not isinstance(initial_map.get("name_jumbo"), Exception) else None
@@ -83,7 +81,6 @@ async def search_barcode_all(
     text_map = dict(zip(text_tasks.keys(), text_results))
 
     buckets: Dict[str, List[SearchItem]] = {k: [] for k in ALLOWED}
-    if "coto" in enabled_set: buckets["coto"] = coto_items
     if "carrefour" in enabled_set: buckets["carrefour"] = _safe(text_map.get("carrefour"))
     if "dia" in enabled_set: buckets["dia"] = _safe(text_map.get("dia"))
     if "jumbo" in enabled_set: buckets["jumbo"] = _safe(text_map.get("jumbo"))

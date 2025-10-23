@@ -2,7 +2,6 @@
 from typing import List, Dict, Optional
 import asyncio, logging
 from scrapers.coto_scraper_async import search_coto_requests as coto_search_sync
-from scrapers.coto_scraper_async import search_coto_by_barcode as coto_search_barcode_sync
 
 
 log = logging.getLogger("coto")
