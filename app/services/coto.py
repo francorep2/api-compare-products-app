@@ -7,14 +7,9 @@ from scrapers.coto_scraper_async import search_coto_by_barcode as coto_search_ba
 
 log = logging.getLogger("coto")
 
-async def search_coto(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
-    if not q and not barcode:
-        return []
+async def search_coto(q: Optional[str] = None, limit: int = 3) -> List[Dict]:
     try:
-        if barcode:
-            return await asyncio.to_thread(coto_search_barcode_sync, str(barcode), limit)
-        else:
-            return await asyncio.to_thread(coto_search_sync, q, limit)
+        return await asyncio.to_thread(coto_search_sync, q, limit)
     except Exception as e:
         log.exception(f"[COTO] error: {e}")
         return []
