@@ -37,12 +37,42 @@ _UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
 )
 
+# Fingerprints seguros según versiones comunes de curl_cffi (evitamos chrome124 si no está soportado)
+SUPPORTED_IMPERSONATES: list[str] = [
+    "chrome120",
+    "chrome116",
+    "chrome110",
+    "edge101",
+    "safari15_3",
+    "firefox110",
+    "chrome",  # genérico
+]
+
+def _try_recreate_session(impersonate: str) -> bool:
+    """
+    Intenta recrear la sesión con el fingerprint dado.
+    Devuelve True si pudo crearla, False si la versión instalada no lo soporta.
+    """
+    global _SESSION
+    try:
+        try:
+            _SESSION.close()
+        except Exception:
+            pass
+        _SESSION = _build_session(impersonate)
+        log.info(f"[COTO] nueva sesión con fingerprint={impersonate}")
+        return True
+    except Exception as e:
+        # Ej: RequestsError: Impersonating X is not supported
+        log.warning(f"[COTO] fingerprint no soportado: {impersonate} ({e})")
+        return False
+
 # ===================== Sesión HTTP =====================
 
 def _build_session(impersonate: str = "chrome") -> Session:
     """
     Crea una sesión curl_cffi con headers de navegación reales
-    y cookie de sucursal preset para esquivar WAF/captcha.
+    y cookie de sucursal preset para esquivar WAF/captcha (HTTP/200 con body de captcha).
     """
     s = crequests.Session(impersonate=impersonate, timeout=_DEFAULT_TIMEOUT)
     s.headers.update({
@@ -57,7 +87,7 @@ def _build_session(impersonate: str = "chrome") -> Session:
         "Sec-Fetch-Site": "same-origin",
         "Sec-Fetch-User": "?1",
         "Upgrade-Insecure-Requests": "1",
-        "Referer": f"{COTO_BASE}/sitios/cdigi/home?idSucursal={COTO_SUCURSAL_ID}&Dy=1",
+        "Referer": f"{COTO_BASE}/sitios/cdigi/busqueda?idSucursal={COTO_SUCURSAL_ID}&Dy=1",
         "sec-ch-ua": '"Google Chrome";v="124", "Chromium";v="124", "Not-A.Brand";v="99"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
@@ -366,16 +396,20 @@ def search_coto_requests(
     items, html_text, status, blocked = _one_search(skip_bootstrap=fast)
 
     if (blocked or status >= 400) and fast:
-        log.warning(f"[COTO] status={status} blocked={blocked} — reintenta con fingerprint 'chrome124'")
-        try:
-            _SESSION.close()
-        except Exception:
-            pass
-        _SESSION = _build_session("chrome124")
-        items, html_text, status, blocked = _one_search(skip_bootstrap=False)
+        log.warning(f"[COTO] status={status} blocked={blocked} — reintentos con fingerprints alternativos")
+        for fp in SUPPORTED_IMPERSONATES:
+            if not _try_recreate_session(fp):
+                continue
+            items, html_text, status, blocked = _one_search(skip_bootstrap=False)
+            if not blocked and status < 400 and items:
+                break
 
     if blocked or status >= 400:
         log.warning(f"[COTO] status={status} blocked={blocked} len={len(html_text)}")
+        # último intento: si no hay items pero no estamos bloqueados, permitir devolver vacío sin error
+        if not blocked and status < 400:
+            return []
+        # si seguimos bloqueados, no forzamos más retries para mantener <12s
         return []
 
     if not items:
