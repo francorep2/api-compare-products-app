@@ -52,15 +52,11 @@ def _enabled_stores_from_prefs(prefs) -> List[str]:
 @router.get("/coto")
 async def search_coto_endpoint(
     q: str | None = Query(None),
-    barcode: str | None = Query(None),
     limit: int = Query(3, ge=1, le=10),
 ):
-    if not q and not barcode:
-        # Evitá disparar el servicio sin inputs
-        raise HTTPException(status_code=400, detail="Debe enviar 'q' o 'barcode'.")
     try:
         items = await asyncio.wait_for(
-            search_coto(q=q, barcode=barcode, limit=limit),
+            search_coto(q=q, limit=limit),
             timeout=REQUEST_BUDGET_SEC,  # ≤ 13s recomendado en Koyeb Free
         )
         return {"results": items}
