@@ -127,3 +127,7 @@ class AsyncBrowserManager:
             yield ctx
         finally:
             await self.close_context(ctx)
+            
+            
+            
+browser_manager_async = AsyncBrowserManager()
