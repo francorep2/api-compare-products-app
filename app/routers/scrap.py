@@ -1,3 +1,5 @@
+import asyncio
+from os import sync
 from typing import List, Optional
 from fastapi import Query
 from app.models.search_item import SearchItem, SearchResponse
@@ -47,11 +49,12 @@ def _enabled_stores_from_prefs(prefs) -> List[str]:
 
 @router.get("/coto")
 async def search_coto_endpoint(
-    q: str | None = Query(None),
-    barcode: str | None = Query(None),
-    limit: int = Query(3, ge=1, le=10),
+    q: str = Query(..., min_length=1),
+    limit: int = 10,
+    barcode: str | None = None,
 ):
-    items = await search_coto(q=q, barcode=barcode, limit=limit)
+    items = await asyncio.to_thread(search_coto, q, limit, barcode)
+
     return {"results": items}
 
 @router.get("/carrefour")
