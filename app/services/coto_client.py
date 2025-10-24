@@ -3,7 +3,7 @@ from typing import Optional, List, Dict
 from collections import OrderedDict
 
 # Solo la función pública del scraper
-from scrapers.coto_scraper_async import search_coto_requests
+from scrapers.coto_scraper_async import search
 
 # ---------- Cache TTL sencilla en memoria ----------
 class _TTLCache:
@@ -59,7 +59,7 @@ class CotoClient:
                 return again
 
             # Ejecutamos el scraper en un thread y cortamos si excede el presupuesto
-            future = self._executor.submit(search_coto_requests, q, limit)
+            future = self._executor.submit(search, q, limit)
             try:
                 result = future.result(timeout=self.budget)  # corta a los N segundos
                 result = result or []
