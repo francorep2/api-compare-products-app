@@ -3,7 +3,7 @@ from os import sync
 from typing import List, Optional
 from fastapi import Query
 from app.models.search_item import SearchItem, SearchResponse
-from app.services.coto_client import search_coto
+from app.services.coto import search_coto
 from app.services.dia import search  
 from app.services.carrefour import search
 from app.services.jumbo import search  
