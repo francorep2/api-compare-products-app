@@ -1,6 +1,8 @@
 import os, time, threading, concurrent.futures
 from typing import Optional, List, Dict
 from collections import OrderedDict
+import asyncio
+import inspect
 
 # Solo la función pública del scraper
 from scrapers.coto_scraper_async import search
@@ -83,6 +85,14 @@ def _norm_digits(v: Optional[str]) -> str:
     if v is None:
         return ""
     return _re.sub(r"\D", "", str(v))
+    
+def _call_impl_maybe_async(fn, q: str, limit: int):
+        if inspect.iscoroutinefunction(fn):
+            return asyncio.run(fn(q, limit))
+        res = fn(q, limit)
+        if inspect.iscoroutine(res):
+            return asyncio.run(res)
+        return res
 
 # ---------- Cache TTL sencilla en memoria ----------
 class _TTLCache:
@@ -91,6 +101,7 @@ class _TTLCache:
         self.maxsize = maxsize
         self.data: OrderedDict[str, tuple[float, List[Dict]]] = OrderedDict()
         self.lock = threading.Lock()
+        
 
     def get(self, k: str) -> Optional[List[Dict]]:
         now = time.time()
@@ -137,8 +148,8 @@ class CotoClient:
             if again is not None:
                 return again
 
-            # Ejecutamos el scraper en un thread y cortamos si excede el presupuesto
-            future = self._executor.submit(search, q, limit)
+            impl = search  # la función importada del scraper
+            future = self._executor.submit(_call_impl_maybe_async, impl, q, limit)
             try:
                 result = future.result(timeout=self.budget)  # corta a los N segundos
                 result = result or []

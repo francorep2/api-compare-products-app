@@ -48,13 +48,8 @@ def _enabled_stores_from_prefs(prefs) -> List[str]:
     return cand
 
 @router.get("/coto")
-async def search_coto_endpoint(
-    q: str = Query(..., min_length=1),
-    limit: int = 10,
-    barcode: str | None = None,
-):
+async def search_coto_endpoint(q: str, limit: int = 10, barcode: str | None = None):
     items = await asyncio.to_thread(search_coto, q, limit, barcode)
-
     return {"results": items}
 
 @router.get("/carrefour")
