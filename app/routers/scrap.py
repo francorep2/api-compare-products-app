@@ -2,9 +2,9 @@ from typing import List, Optional
 from fastapi import Query
 from app.models.search_item import SearchItem, SearchResponse
 from app.services.coto import search_coto
-from app.services.dia import search  
-from app.services.carrefour import search
-from app.services.jumbo import search  
+from app.services.dia import search as search_dia
+from app.services.carrefour import search as search_carrefour
+from app.services.jumbo import search as search_jumbo
 from fastapi import APIRouter, Query
 from app.services.all import search_all_grouped
 from app.dependencies.auth import get_current_user, User
@@ -60,7 +60,7 @@ async def search_carrefour_endpoint(
     barcode: str | None = Query(None),
     limit: int = Query(3, ge=1, le=10),
 ):
-    items = await search(q=q, barcode=barcode, limit=limit)
+    items = await search_carrefour(q=q, barcode=barcode, limit=limit)
     return {"results": items}
 
 @router.get("/dia")
@@ -69,7 +69,7 @@ async def search_dia_endpoint(
     barcode: str | None = Query(None),
     limit: int = Query(3, ge=1, le=10),
 ):
-    items = await search(q=q, barcode=barcode, limit=limit)
+    items = await search_dia(q=q, barcode=barcode, limit=limit)
     return {"results": items}
 
 
@@ -79,7 +79,7 @@ async def search_jumbo_endpoint(
     barcode: str | None = Query(None),
     limit: int = Query(3, ge=1, le=10),
 ):
-    items = await search(q=q, barcode=barcode, limit=limit)
+    items = await search_jumbo(q=q, barcode=barcode, limit=limit)
     return {"results": items}
 
 

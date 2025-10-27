@@ -23,7 +23,6 @@ class AsyncBrowserManager:
         print("[BrowserManager] Iniciando Playwright...")
         if self._pw is None:
             self._pw = await async_playwright().start()
-            # ← flags clave en Koyeb
             self._browser = await self._pw.chromium.launch(
                 headless=headless,
                 args=["--no-sandbox", "--disable-dev-shm-usage"]
@@ -54,18 +53,6 @@ class AsyncBrowserManager:
             yield ctx
         finally:
             await ctx.close()
-
-    @asynccontextmanager
-    async def page(self) -> Page:
-        """
-        Proporciona una página de un contexto nuevo.
-        """
-        async with self.context() as ctx:
-            page = await ctx.new_page()
-            try:
-                yield page
-            finally:
-                pass # El 'with self.context()' ya la cierra.
 
 # Creamos una instancia global
 browser_manager_async = AsyncBrowserManager()

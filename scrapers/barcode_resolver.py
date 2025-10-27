@@ -110,3 +110,7 @@ async def resolve_name_dia(ean: str) -> Optional[str]:
 
 async def resolve_name_jumbo(ean: str) -> Optional[str]:
     return await _resolve_name_vtex("www.jumbo.com.ar", ean)
+
+def resolve_name_coto(barcode: str) -> Optional[str]:
+    print(f"[Resolver Coto] Buscando nombre para {barcode}...")
+    return None

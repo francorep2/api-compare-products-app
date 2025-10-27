@@ -13,5 +13,4 @@ DEFAULT_CTX = {
 }
 
 async def search(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = 3) -> List[Dict]:
-    async with browser_manager_async.new_context(**DEFAULT_CTX) as ctx:
-        return await jumbo_search(ctx, q=q, barcode=barcode, limit=limit)
+        return await jumbo_search(q=q, barcode=barcode, limit=limit)
