@@ -1,101 +1,168 @@
+# Reemplaza tu función compare_items_background con esta
+
 import asyncio
 import datetime
 import uuid
 from typing import List, Set, Optional, Dict
+import logging # Para logging de errores
 
 from app.schemas import shopping_list
-from app.services import coto, dia, carrefour, jumbo
+from app.services import coto, dia, carrefour, jumbo # Asume que estos importan la función 'search' correcta
 from app.services.text_matching import find_best_match_for_item
 from app.core.browser_async import browser_manager_async
-from app.task_db import tasks 
+from app.task_db import tasks # Tu "almacén" de tareas
+
+log = logging.getLogger(__name__)
 
 SCRAPER_MODULES = { "coto": coto, "dia": dia, "carrefour": carrefour, "jumbo": jumbo }
+ALLOWED_SCRAPERS = set(SCRAPER_MODULES.keys())
+PLAYWRIGHT_SCRAPERS = {"coto", "jumbo"} # Marcar cuáles usan Playwright
+
+# --- Limitador de Concurrencia para Playwright ---
+# Es importante limitar cuántos scrapers pesados corren a la vez
+PLAYWRIGHT_CONCURRENCY_LIMIT = 1
+playwright_semaphore = asyncio.Semaphore(PLAYWRIGHT_CONCURRENCY_LIMIT)
+# -------------------------------------------------
+
+async def run_single_search(store_name: str, store_module, item_name: str, limit: int = 3):
+    """ Ejecuta una única búsqueda para un item en una tienda, aplicando semáforo si es Playwright """
+    is_playwright = store_name in PLAYWRIGHT_SCRAPERS
+    
+    if is_playwright:
+        print(f"[{store_name}] Waiting for semaphore for item '{item_name}'...")
+        async with playwright_semaphore:
+            print(f"[{store_name}] Acquired semaphore for item '{item_name}'. Searching...")
+            try:
+                # La función 'search' del scraper ya maneja su propio timeout y contexto
+                result = await store_module.search(q=item_name, limit=limit)
+                print(f"[{store_name}] Finished search for item '{item_name}'.")
+                return result
+            except Exception as e:
+                 log.error(f"[{store_name}] Scraper failed for item '{item_name}': {e}", exc_info=True)
+                 return e # Devolver excepción para manejo posterior
+            finally:
+                print(f"[{store_name}] Released semaphore for item '{item_name}'.")
+    else:
+        # Scrapers sin Playwright (Dia, Carrefour)
+        print(f"[{store_name}] Searching for item '{item_name}'...")
+        try:
+             result = await store_module.search(q=item_name, limit=limit)
+             print(f"[{store_name}] Finished search for item '{item_name}'.")
+             return result
+        except Exception as e:
+             log.error(f"[{store_name}] Scraper failed for item '{item_name}': {e}", exc_info=True)
+             return e # Devolver excepción
 
 async def compare_items_background(task_id: str, items: List[shopping_list.ComparisonItemIn], enabled_stores: Optional[List[str]] = None):
     """
-    Esta función se ejecuta en segundo plano. No devuelve nada, sino que
-    actualiza el diccionario 'tasks' con el resultado final.
+    Función de fondo optimizada: procesa items secuencialmente por tienda
+    y limita la concurrencia de scrapers Playwright.
     """
-    # Marcamos la tarea como "en proceso"
-    tasks[task_id] = {"status": "processing", "data": None}
+    tasks[task_id] = {"status": "processing", "data": None, "start_time": datetime.datetime.now().isoformat()}
     print(f"[BG Task] {task_id}: Iniciando comparación para {len(items)} productos...")
     
-    allowed_stores = set(SCRAPER_MODULES.keys())
-    enabled_set = set(enabled_stores) & allowed_stores if enabled_stores else allowed_stores
-
-    tasks_map: Dict[str, asyncio.Task] = {}
+    enabled_set = set(enabled_stores) & ALLOWED_SCRAPERS if enabled_stores else ALLOWED_SCRAPERS
     
-    async def coto_worker():
-        async with browser_manager_async.new_context() as coto_ctx:
-            coto_tasks = [coto.search(ctx=coto_ctx, q=item.nombre, limit=3) for item in items]
-            return await asyncio.gather(*coto_tasks, return_exceptions=True)
+    all_stores_results: Dict[str, list] = {store: [] for store in enabled_set} # Inicializar listas
 
-    if "coto" in enabled_set:
-        tasks_map["coto"] = asyncio.create_task(coto_worker())
-    
-    for store_name in ["dia", "carrefour", "jumbo"]:
-        if store_name in enabled_set:
-            store_module = SCRAPER_MODULES.get(store_name)
-            if store_module:
-                async def api_store_worker(module=store_module):
-                    api_tasks = [module.search(q=item.nombre, limit=3) for item in items]
-                    return await asyncio.gather(*api_tasks, return_exceptions=True)
-                tasks_map[store_name] = asyncio.create_task(api_store_worker())
+    # --- Ejecutar Búsquedas Secuencialmente por Tienda ---
+    # Esto evita sobrecargar el servidor lanzando demasiadas tareas concurrentes,
+    # especialmente útil para Playwright.
+    for store_name in enabled_set:
+        store_module = SCRAPER_MODULES.get(store_name)
+        if not store_module:
+            log.warning(f"[BG Task] {task_id}: Módulo no encontrado para {store_name}")
+            all_stores_results[store_name] = [[] for _ in items] # Llenar con listas vacías
+            continue
+            
+        print(f"[BG Task] {task_id}: Procesando tienda {store_name}...")
+        store_item_results = []
+        for item in items:
+            # Ejecutar la búsqueda para este item y tienda
+            result = await run_single_search(store_name, store_module, item.nombre)
+            
+            # Guardar el resultado (o lista vacía si falló)
+            if isinstance(result, Exception):
+                store_item_results.append([]) # Guardar lista vacía en caso de error
+            elif isinstance(result, list):
+                store_item_results.append(result)
+            else:
+                log.warning(f"Resultado inesperado de {store_name} para '{item.nombre}': {type(result)}")
+                store_item_results.append([])
+                
+        all_stores_results[store_name] = store_item_results
+        print(f"[BG Task] {task_id}: Tienda {store_name} procesada.")
 
-    await asyncio.wait(tasks_map.values())
-
-    all_stores_results: Dict[str, list] = {}
-    for store_name, task in tasks_map.items():
-        try:
-            result = task.result()
-            all_stores_results[store_name] = [res if not isinstance(res, Exception) else [] for res in result]
-        except Exception as e:
-            print(f"[BG Task] {task_id}: Error en el worker de la tienda {store_name}: {e}")
-            all_stores_results[store_name] = [[] for _ in items]
-
+    # --- Procesamiento de Resultados (como antes) ---
+    print(f"[BG Task] {task_id}: Procesando resultados...")
     comparison_result = {
         store: {"total": 0.0, "items": [], "missing_count": 0, "missing_items": []} 
         for store in enabled_set
     }
 
     for i, item in enumerate(items):
+        item_found_in_any_store = False # Para rastrear si el item se encontró en al menos una tienda
         for store_name in enabled_set:
-            if store_name in all_stores_results and i < len(all_stores_results[store_name]):
+            store_data = comparison_result[store_name] # Acceso directo al diccionario
+            
+            # Asegurarse de que el índice i existe en los resultados de la tienda
+            if i < len(all_stores_results.get(store_name, [])):
                 item_results_from_store = all_stores_results[store_name][i]
+                
+                # Pasar solo la lista de resultados (ya validada o [])
                 best_match = find_best_match_for_item(item.nombre, item_results_from_store)
                 
                 if best_match and best_match.get("price"):
                     try:
-                        price = float(str(best_match["price"]).replace("ARS", "").strip())
-                        comparison_result[store_name]["items"].append({
-                            "original_name": item.nombre, "found_name": best_match.get("title"),
-                            "price": price, "quantity": item.cantidad,
+                        # Extraer y limpiar precio (ej. quitar 'ARS ', convertir a float)
+                        price_str = str(best_match["price"]).upper().replace("ARS", "").replace("$", "").replace(".", "").replace(",", ".").strip()
+                        price = float(price_str)
+                        
+                        store_data["items"].append({
+                            "original_name": item.nombre, 
+                            "found_name": best_match.get("title"),
+                            "price": price, 
+                            "quantity": item.cantidad,
+                            "url": best_match.get("url"), # Incluir URL si está disponible
+                            "image_url": best_match.get("image_url") # Incluir imagen si está disponible
                         })
-                        comparison_result[store_name]["total"] += price * item.cantidad
-                    except (ValueError, AttributeError):
-                        comparison_result[store_name]["missing_count"] += 1
-                        comparison_result[store_name]["missing_items"].append(item.nombre)
+                        store_data["total"] += price * item.cantidad
+                        item_found_in_any_store = True # Marcar como encontrado
+                    except (ValueError, TypeError, AttributeError) as e:
+                        log.warning(f"Error procesando precio '{best_match.get('price')}' para '{item.nombre}' en {store_name}: {e}")
+                        store_data["missing_count"] += 1
+                        store_data["missing_items"].append(item.nombre)
                 else:
-                    comparison_result[store_name]["missing_count"] += 1
-                    comparison_result[store_name]["missing_items"].append(item.nombre)
+                    store_data["missing_count"] += 1
+                    store_data["missing_items"].append(item.nombre)
             else:
-                 comparison_result[store_name]["missing_count"] += 1
-                 comparison_result[store_name]["missing_items"].append(item.nombre)
+                # Si no hay resultados para este índice (error previo), marcar como faltante
+                store_data["missing_count"] += 1
+                store_data["missing_items"].append(item.nombre)
 
-    winner = min((store for store, data in comparison_result.items() if data["missing_count"] == 0),
-        key=lambda s: comparison_result[s]["total"], default=None)
+    # --- Cálculo del Ganador y Totales (como antes) ---
+    winner = min(
+        (store for store, data in comparison_result.items() if data["missing_count"] == 0),
+        key=lambda s: comparison_result[s]["total"], 
+        default=None # Si ninguna tienda tiene todos los items, no hay ganador
+    )
     
     totals_by_store = {
-        store_name: {"total": data["total"], "missing_count": data["missing_count"], "missing_items": data["missing_items"]}
+        store_name: {
+            "total": round(data["total"], 2), # Redondear total
+            "missing_count": data["missing_count"], 
+            "missing_items": data["missing_items"]
+        }
         for store_name, data in comparison_result.items()
     }
     
     final_data = {
         "totals_by_store": totals_by_store,
         "winner": winner,
+        "comparison_details": comparison_result, # Incluir detalles completos opcionalmente
         "updated_at": datetime.datetime.now().isoformat()
     }
     
-    # Guardamos el resultado final en el "almacén"
-    tasks[task_id] = {"status": "completed", "data": final_data}
-    print(f"[BG Task] {task_id}: Comparación finalizada y guardada.")
+    # Guardar el resultado final
+    tasks[task_id] = {"status": "completed", "data": final_data, "end_time": datetime.datetime.now().isoformat()}
+    print(f"[BG Task] {task_id}: Comparación finalizada y guardada. Ganador: {winner}")
