@@ -4,9 +4,9 @@ import logging
 
 from app.core.browser_async import browser_manager_async
 from app.services.coto import search_coto        # <-- ojo: usar el nombre real exportado
-from app.services.carrefour import search as search_carrefour
-from app.services.dia import search as search_dia
-from app.services.jumbo import search as search_jumbo
+from app.services.carrefour import search_carrefour
+from app.services.dia import search_dia
+from app.services.jumbo import search_jumbo
 
 log = logging.getLogger(__name__)
 
