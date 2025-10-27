@@ -1,7 +1,8 @@
 # app/core/browser_async.py
 from contextlib import asynccontextmanager
-from playwright.async_api import async_playwright, Playwright, Browser
-import asyncio
+from playwright.async_api import (
+    async_playwright, Playwright, Browser, BrowserContext, Page
+)
 
 DEFAULT_CTX = {
     "locale": "es-AR",
@@ -13,53 +14,58 @@ DEFAULT_CTX = {
 }
 
 class AsyncBrowserManager:
-    def __init__(self, max_contexts: int = 2):
+    
+    def __init__(self):
         self._pw: Playwright | None = None
         self._browser: Browser | None = None
-        self._ctx_sem = asyncio.Semaphore(max_contexts)
-        self._lock = asyncio.Lock()
-
-    async def _ensure_started(self):
-        async with self._lock:
-            if self._pw is None:
-                self._pw = await async_playwright().start()
-            # Si el browser no existe o está desconectado, relanzar
-            if self._browser is None or getattr(self._browser, "is_connected", lambda: False)() is False:
-                self._browser = await self._pw.chromium.launch(headless=True)
-
-    async def startup(self):
-        await self._ensure_started()
+        
+    async def startup(self, headless: bool = True):
+        print("[BrowserManager] Iniciando Playwright...")
+        if self._pw is None:
+            self._pw = await async_playwright().start()
+            # ← flags clave en Koyeb
+            self._browser = await self._pw.chromium.launch(
+                headless=headless,
+                args=["--no-sandbox", "--disable-dev-shm-usage"]
+            )
+        print("[BrowserManager] Browser iniciado.")
 
     async def shutdown(self):
-        async with self._lock:
-            if self._browser:
-                await self._browser.close()
-                self._browser = None
-            if self._pw:
-                await self._pw.stop()
-                self._pw = None
+        if self._browser:
+            await self._browser.close()
+        if self._pw:
+            await self._pw.stop()
+        self._browser = None
+        self._pw = None
+        print("[BrowserManager] Browser detenido.")
 
     @asynccontextmanager
-    async def new_context(self, **ctx_options):
-        await self._ensure_started()
-        await self._ctx_sem.acquire()
-        context = None
+    async def context(self, context_options: dict | None = None) -> BrowserContext:
+        """
+        Proporciona un contexto de navegador seguro que se auto-inicia y se auto-cierra.
+        """
+        if self._browser is None:
+            await self.startup(headless=True)
+        
+        options = context_options or DEFAULT_CTX
+        ctx = await self._browser.new_context(**options)
+        
         try:
-            context = await self._browser.new_context(**ctx_options)
-            yield context
-        except Exception:
-            # Si falla por browser cerrado, intentar una vez recrear y reintentar
-            try:
-                await self._ensure_started()
-                context = await self._browser.new_context(**ctx_options)
-                yield context
-            finally:
-                if context:
-                    await context.close()
-        else:
-            if context:
-                await context.close()
+            yield ctx
         finally:
-            self._ctx_sem.release()
+            await ctx.close()
 
-browser_manager_async = AsyncBrowserManager(max_contexts=2)
+    @asynccontextmanager
+    async def page(self) -> Page:
+        """
+        Proporciona una página de un contexto nuevo.
+        """
+        async with self.context() as ctx:
+            page = await ctx.new_page()
+            try:
+                yield page
+            finally:
+                pass # El 'with self.context()' ya la cierra.
+
+# Creamos una instancia global
+browser_manager_async = AsyncBrowserManager()
