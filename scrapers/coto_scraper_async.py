@@ -485,110 +485,108 @@ async def fetch_coto_pdp_optimized(page: Page, href: str, timeout: int = DEFAULT
         return {"title": None, "price": None, "url": href, "image_url": None, "barcode": None, "promotion": None}
     # ¡IMPORTANTE! No cerramos la página aquí
 
-
-async def coto_search_top_n(ctx: BrowserContext, query: str, limit: int = TOP_N) -> List[Dict]:
+async def coto_search_fast_mode(ctx: BrowserContext, query: str, limit: int = TOP_N) -> List[Dict]:
     """
-    Versión OPTIMIZADA.
-    Procesa los productos UNO POR UNO y se detiene cuando llega al límite.
-    Esto evita la sobrecarga de RAM de abrir N páginas a la vez.
+    MODO SUPER RÁPIDO: Solo busca, extrae links y títulos de la grilla. NO entra a PDPs.
     """
     search_url = (
         f"{COTO_BASE}/sitios/cdigi/categoria"
         f"?_dyncharset=utf-8&Dy=1&Ntt={urllib.parse.quote(query)}&idSucursal={COTO_SUCURSAL_ID}"
     )
     
-    # Página para la búsqueda
     page = await ctx.new_page()
-    # Página REUTILIZABLE para los productos (PDP)
-    pdp_page = await ctx.new_page() 
-    
+    # await _enable_speed_routes(page) # Podrías habilitar esto para bloquear CSS/JS si aún falla
+
     try:
-        print(f"[LOG] Coto Browser GET {search_url}")
-        await page.goto(search_url, wait_until="domcontentloaded", timeout=DEFAULT_GOTO_TIMEOUT_MS)
+        print(f"[LOG] Coto FAST MODE GET {search_url}")
+        # Usamos el timeout de goto
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=DEFAULT_GOTO_TIMEOUT_MS) 
 
-        await page.wait_for_selector("a[href*='/sitios/cdigi/productos/']", timeout=DEFAULT_SELECTOR_TIMEOUT_MS)
+        anchors_selector = "a[href*='/sitios/cdigi/productos/']"
+        # Usamos el timeout de selector
+        await page.wait_for_selector(anchors_selector, timeout=DEFAULT_SELECTOR_TIMEOUT_MS) 
         
-        await page.mouse.wheel(0, 500)
-        await asyncio.sleep(0.2)
+        # Opcional: Scroll ligero por si los productos cargan con delay
+        await page.mouse.wheel(0, 300)
+        await asyncio.sleep(0.1)
 
-        anchors = page.locator("a[href*='/sitios/cdigi/productos/']")
-        total = await anchors.count()
-        if not total:
-            return []
+        # Extraer datos directamente de la grilla con JS (más rápido)
+        card_data = await page.eval_on_selector_all(
+            anchors_selector,
+            """(anchors, limit) => {
+                const results = [];
+                const seenUrls = new Set();
+                for (let a of anchors) {
+                    if (results.length >= limit) break;
+                    
+                    const href = a.getAttribute('href');
+                    if (!href) continue;
+                    
+                    // Simple dedupe based on href before normalization
+                    if (seenUrls.has(href)) continue;
+                    seenUrls.add(href);
 
+                    const card = a.closest('[class*="product"]');
+                    let title = null;
+                    if (card) {
+                        // Intentamos buscar varios selectores de título
+                        const titleEl = card.querySelector('[class*="product_title"]') || 
+                                        card.querySelector('[class*="productName"]') ||
+                                        card.querySelector('[data-testid="product-title"]') || 
+                                        card.querySelector('h3');
+                        if (titleEl) title = titleEl.textContent;
+                    }
+                    
+                    results.push({ href: href, title: title });
+                }
+                return results;
+            }""",
+            limit # Pasamos el límite a la función JS
+        )
+
+        # Mapear a tu template final
         results: List[Dict] = []
-        seen_hrefs = set()
-        
-        # Iteramos uno por uno hasta un máximo de 'limit * 4'
-        for i in range(min(total, limit * 4)):
-            if len(results) >= limit:
-                print(f"[LOG] Límite de {limit} alcanzado. Deteniendo búsqueda.")
-                break # ¡ÉXITO! Ya tenemos los productos.
-            
-            a = anchors.nth(i)
-            href = await a.get_attribute("href")
-            
-            if not href:
-                continue
-                
-            full_href = absolutize(COTO_BASE, href)
-            
-            if full_href in seen_hrefs:
-                continue
-            
-            seen_hrefs.add(full_href)
-            
-            card_promo = await extract_promotion_from_card(a)
-            
-            # Filtro por título (opcional, pero recomendado)
-            # if not _title_seems_related(await a.inner_text(), query):
-            #     print(f"[LOG] Descartado por título no relacionado.")
-            #     continue
-            
-            try:
-                # Reutilizamos la misma 'pdp_page'
-                pdp_data = await fetch_coto_pdp_optimized(pdp_page, full_href)
-                
-                if pdp_data.get("promotion") is None and card_promo:
-                    pdp_data["promotion"] = card_promo
-                
-                # Solo agregamos si es un resultado válido (tiene título y precio)
-                if pdp_data and pdp_data.get("title") and pdp_data.get("price"):
-                    results.append(pdp_data)
-                else:
-                    print(f"[LOG] PDP descartado (sin título o precio): {full_href}")
+        seen_final_urls = set()
+        for item in card_data:
+            if len(results) >= limit: break # Doble check del límite
 
-            except Exception as e:
-                print(f"[LOG] Error procesando PDP en serie: {e}")
-                
-        return results[:limit]
+            full_url = absolutize(COTO_BASE, item.get('href'))
+            if not full_url or full_url in seen_final_urls:
+                continue
+            seen_final_urls.add(full_url)
+            
+            # Intentar sacar Barcode/SKU de la URL
+            barcode = None
+            m = re.search(r'-([0-9]{8,14})(?:-|$)', full_url)
+            if m:
+                barcode = normalize_barcode(m.group(1)) # Usa tu función normalize_barcode
+
+            results.append({
+                "title": clean_text(item.get('title')), # Usa tu función clean_text
+                "price": None, # No disponible en modo rápido
+                "url": full_url,
+                "image_url": None, # No disponible en modo rápido
+                "barcode": barcode, # Mejor que nada
+                "promotion": None # No disponible en modo rápido
+            })
+
+        print(f"[LOG] Coto FAST MODE encontró {len(results)} items.")
+        return results
 
     except Exception as e:
-        print(f"[LOG] Browser search error: {e}")
+        # Esto incluye Playwright TimeoutError si page.goto o wait_for_selector fallan
+        print(f"[LOG] Coto FAST MODE search error: {e}")
+        # await save_debug_html(page, "coto_fast_error") # Descomenta para debug local
         return []
     finally:
-        # Cerramos las páginas que creamos
         await page.close()
-        await pdp_page.close()
 
 
 async def coto_search_by_barcode(ctx: BrowserContext, ean: str, limit: int = TOP_N) -> List[Dict]:
-    """
-    Optimizado para buscar por EAN.
-    Busca y solo comprueba el primer resultado.
-    """
-    # Buscamos el EAN como texto, pidiendo solo 2 resultados
-    prelim = await coto_search_top_n(ctx, ean, limit=2)
-    
-    out = []
-    for item in prelim:
-        bc = item.get("barcode")
-        if bc and bc == ean:
-            out.append(item)
-            if len(out) >= limit:
-                break
-    
-    return out or prelim[:limit] # Devolvemos solo si coincide
+    """ Busca por barcode usando el modo rápido. """
+    # En modo rápido, no podemos verificar el barcode DENTRO del PDP.
+    # Simplemente buscamos el EAN como texto y devolvemos los resultados.
+    return await coto_search_fast_mode(ctx, ean, limit=limit)
 
 # ===================================================
 # API PÚBLICA (Usa el modo rápido y el timeout global)
@@ -598,9 +596,9 @@ async def search(q: Optional[str] = None, barcode: Optional[str] = None, limit: 
     if not query_input or not query_input.strip():
         print("[COTO LOG] Search query is empty. Returning [].")
         return []
-
+        
     query = query_input.strip()
-    is_barcode_search = bool(barcode and normalize_barcode(query)) # Usa normalize_barcode
+    is_barcode_search = bool(barcode and normalize_barcode(query)) # Usa normalize_barcode para chequear
 
     print(f"[COTO LOG] Iniciando búsqueda FAST MODE con budget {SCRAPER_BUDGET_SEC}s para: '{query}' (IsBarcode: {is_barcode_search})")
 
@@ -610,15 +608,15 @@ async def search(q: Optional[str] = None, barcode: Optional[str] = None, limit: 
             # --- OBTENER CONTEXTO ---
             async with browser_manager_async.context() as ctx:
                 # --- LLAMAR AL SCRAPER MODO RÁPIDO ---
-                # Esta función NO entra a los PDPs
+                # Ya sea búsqueda por texto o barcode, usamos la misma función rápida
                 return await coto_search_fast_mode(ctx, query, limit=limit)
-
+                
     except asyncio.TimeoutError:
         print(f"[COTO LOG] TIMEOUT GLOBAL ({SCRAPER_BUDGET_SEC}s) reached for: '{query}'. Returning empty list.")
         return []
-
+        
     except Exception as e:
         print(f"[COTO ERROR] Critical failure in search function for '{query}': {e}")
         import traceback
-        traceback.print_exc()
+        traceback.print_exc() 
         return []
