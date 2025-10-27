@@ -591,47 +591,34 @@ async def coto_search_by_barcode(ctx: BrowserContext, ean: str, limit: int = TOP
     return out or prelim[:limit] # Devolvemos solo si coincide
 
 # ===================================================
-# API PÚBLICA DEL SCRAPER (La que llama tu servicio)
+# API PÚBLICA (Usa el modo rápido y el timeout global)
 # ===================================================
-
 async def search(q: Optional[str] = None, barcode: Optional[str] = None, limit: int = TOP_N) -> List[Dict]:
-    """
-    Punto de entrada principal.
-    Obtiene un contexto del manager y lo pasa a las funciones de scraping.
-    TIENE UN TIMEOUT GLOBAL PARA KOYEB.
-    """
-    query_to_search = barcode if barcode else q
-    print(f"[LOG] Iniciando búsqueda con budget de {SCRAPER_BUDGET_SEC}s para: '{query_to_search}'")
+    query_input = barcode if barcode else q
+    if not query_input or not query_input.strip():
+        print("[COTO LOG] Search query is empty. Returning [].")
+        return []
+
+    query = query_input.strip()
+    is_barcode_search = bool(barcode and normalize_barcode(query)) # Usa normalize_barcode
+
+    print(f"[COTO LOG] Iniciando búsqueda FAST MODE con budget {SCRAPER_BUDGET_SEC}s para: '{query}' (IsBarcode: {is_barcode_search})")
 
     try:
-        # --- EL TIMEOUT GLOBAL ---
-        # Si todo (incluido el arranque) tarda más de 9s, se cancela.
+        # --- TIMEOUT GLOBAL ---
         async with asyncio.timeout(SCRAPER_BUDGET_SEC):
-            
-            # 1. Obtenemos el contexto (aquí ocurre el "cold start")
+            # --- OBTENER CONTEXTO ---
             async with browser_manager_async.context() as ctx:
-                
-                # 2. Tu lógica original
-                ean = normalize_barcode(barcode or (q or ""))
-                
-                if ean and (not q or q.strip() == ean):
-                    print(f"[LOG] Buscando por barcode: {ean}")
-                    return await coto_search_by_barcode(ctx, ean, limit=limit)
-                    
-                if q and q.strip():
-                    print(f"[LOG] Buscando por query: {q.strip()}")
-                    return await coto_search_top_n(ctx, q.strip(), limit=limit)
-                    
-                return []
-                
+                # --- LLAMAR AL SCRAPER MODO RÁPIDO ---
+                # Esta función NO entra a los PDPs
+                return await coto_search_fast_mode(ctx, query, limit=limit)
+
     except asyncio.TimeoutError:
-        # Esto es un ÉXITO para nosotros.
-        # El scraper tardó más de 9s (por el cold start) y lo cortamos
-        # antes de que Koyeb nos diera 504.
-        print(f"[LOG] TIMEOUT GLOBAL ({SCRAPER_BUDGET_SEC}s) alcanzado para: '{query_to_search}'. Devolviendo [].")
+        print(f"[COTO LOG] TIMEOUT GLOBAL ({SCRAPER_BUDGET_SEC}s) reached for: '{query}'. Returning empty list.")
         return []
-        
+
     except Exception as e:
-        # Cualquier otro error (ej: Playwright no pudo arrancar)
-        print(f"[ERROR] Falla crítica en 'search': {e}")
+        print(f"[COTO ERROR] Critical failure in search function for '{query}': {e}")
+        import traceback
+        traceback.print_exc()
         return []
