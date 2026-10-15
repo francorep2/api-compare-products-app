@@ -1,0 +1,8 @@
+{
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "railway": "^3.16.0"
+  }
+}
