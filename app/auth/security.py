@@ -8,8 +8,7 @@ import secrets, hashlib
 
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
-JWT_ALG = "HS256"
+from app.core.settings import JWT_SECRET, JWT_ALGORITHM as JWT_ALG
 ACCESS_MINUTES = 60
 REFRESH_TTL_DAYS = 30
 

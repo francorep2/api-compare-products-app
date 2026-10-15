@@ -1,12 +1,10 @@
 # app/models/shopping.py
 from dataclasses import Field
 from typing import List, Optional
-from sqlalchemy.orm import Mapped, mapped_column, relationship, DeclarativeBase
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.db import Base
 from sqlalchemy import JSON, Column, Date, ForeignKey, text, Boolean
 from datetime import date, datetime
-
-class Base(DeclarativeBase):
-    pass
 
 class ShoppingList(Base):
     __tablename__ = "shopping_list"

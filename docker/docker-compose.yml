@@ -7,7 +7,7 @@ services:
     environment:
       POSTGRES_DB: groceries
       POSTGRES_USER: appuser
-      POSTGRES_PASSWORD: super-secret
+      POSTGRES_PASSWORD: super-secret   # solo desarrollo local
     ports:
       - "5432:5432"
     volumes:

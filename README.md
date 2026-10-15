@@ -24,6 +24,18 @@ uvicorn app.main:app --reload
 ```
 Docs interactivas en `http://localhost:8000/docs`, health check en `/health`.
 
+## Configuración y base de datos
+- `JWT_SECRET` es **obligatorio** en producción (la app no arranca sin uno real). Generar: `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Para desarrollo local usá `APP_ENV=dev` (ver `.env.example`).
+- El esquema se maneja con **Alembic** (`alembic/`). El Dockerfile corre `alembic upgrade head` antes de levantar el server y falla el deploy si la migración falla. Nueva migración: `alembic revision -m "descripcion"`.
+- La migración `0001` es idempotente: sobre una base existente no toca nada y crea solo las tablas que falten.
+
+## Tests
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pytest -q
+```
+Los tests no usan red ni Postgres (tiendas simuladas, SQLite en memoria). CI: `.github/workflows/tests.yml`.
+
 ## Rendimiento
 - Búsqueda en las 4 tiendas: ~0,3–1 s (cacheada: instantánea). Búsqueda por código de barras: ~0,3 s.
 - Comparar una lista de 15 productos en 4 tiendas: ~2–3 s.

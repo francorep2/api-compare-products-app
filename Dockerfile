@@ -19,5 +19,5 @@ ENV PYTHONPATH=/app
 
 EXPOSE 8000
 CMD bash -lc '\
-  if [ -f "alembic.ini" ]; then alembic upgrade head || echo "skip"; fi && \
+  alembic upgrade head && \
   python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --log-level info'
