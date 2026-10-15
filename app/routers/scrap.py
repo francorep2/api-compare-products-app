@@ -1,5 +1,4 @@
 import asyncio
-from http.client import HTTPException
 from typing import List, Optional
 from fastapi import Query
 from app.models.search_item import SearchItem, SearchResponse
@@ -8,9 +7,9 @@ from app.services.dia import search_dia
 from app.services.carrefour import search_carrefour
 from app.services.jumbo import search as search_jumbo
 from fastapi import APIRouter, Query
-from app.services.all import safe_call, search_all
+from app.services.all import safe_call
 from app.dependencies.auth import get_current_user, User
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from app.db import get_db
