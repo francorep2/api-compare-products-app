@@ -9,7 +9,7 @@ previews:
 
 services:
   - type: web
-    name: groceries-api
+    name: changuito-api
     runtime: docker
     plan: free
     region: virginia
