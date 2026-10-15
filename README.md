@@ -29,4 +29,4 @@ Docs interactivas en `http://localhost:8000/docs`, health check en `/health`.
 - Comparar una lista de 15 productos en 4 tiendas: ~2–3 s.
 
 ## Notas
-- El estado de las comparaciones (`app/task_db.py`) vive en memoria: se pierde al reiniciar y requiere 1 solo worker.
+- Las comparaciones se guardan en Postgres (`comparison_tasks`, se purgan a las 24 h) y cada una solo la puede leer su dueño, así que sobreviven reinicios y funcionan con varios workers.

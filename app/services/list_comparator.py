@@ -15,18 +15,11 @@ from typing import Dict, List, Optional
 from app.providers import STORES, search_store
 from app.schemas import shopping_list
 from app.services.text_matching import find_best_match_for_item
-from app.task_db import tasks
+from app import task_db
 
 log = logging.getLogger("comparator")
 
-TASK_TTL_SEC = 60 * 60
 MAX_PARALLEL = 32  # búsquedas simultáneas por comparación
-
-
-def _prune_tasks() -> None:
-    now = time.time()
-    for tid in [t for t, v in tasks.items() if now - v.get("created", now) > TASK_TTL_SEC]:
-        tasks.pop(tid, None)
 
 
 def _price(item: Dict) -> Optional[float]:
@@ -36,8 +29,9 @@ def _price(item: Dict) -> Optional[float]:
         return None
 
 
-def _result(data: Dict) -> Dict:
-    return {"status": "completed", "created": time.time(), "data": data}
+async def _save(task_id: str, data: Dict) -> None:
+    # SQLAlchemy es síncrono: lo sacamos del event loop
+    await asyncio.to_thread(task_db.finish_task, task_id, data)
 
 
 async def compare_items_background(
@@ -45,9 +39,7 @@ async def compare_items_background(
     items: List[shopping_list.ComparisonItemIn],
     enabled_stores: Optional[List[str]] = None,
 ):
-    """Corre en segundo plano y deja el resultado en `tasks[task_id]`."""
-    _prune_tasks()
-    tasks[task_id] = {"status": "processing", "data": None, "created": time.time()}
+    """Corre en segundo plano y guarda el resultado en la tabla comparison_tasks."""
     started = time.monotonic()
 
     stores = [s for s in (enabled_stores or STORES) if s in STORES]
@@ -75,7 +67,7 @@ async def compare_items_background(
 
         complete = [s for s in stores if summary[s]["missing_count"] == 0]
         winner = min(complete, key=lambda s: summary[s]["total"], default=None)
-        tasks[task_id] = _result({
+        await _save(task_id, {
             "totals_by_store": summary,
             "winner": winner,
             "updated_at": datetime.datetime.now().isoformat(),
@@ -84,7 +76,7 @@ async def compare_items_background(
                  task_id, time.monotonic() - started, len(items), len(stores))
     except Exception:  # noqa: BLE001
         log.exception("comparación %s falló", task_id)
-        tasks[task_id] = _result({
+        await _save(task_id, {
             "totals_by_store": {},
             "winner": None,
             "updated_at": datetime.datetime.now().isoformat(),

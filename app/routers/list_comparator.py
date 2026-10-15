@@ -1,4 +1,5 @@
 import uuid
+from app import task_db
 from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException, status
 from app.schemas import shopping_list
 from app.services import list_comparator
@@ -17,6 +18,8 @@ def start_comparison(
     Responde al instante.
     """
     task_id = str(uuid.uuid4())
+    # La fila existe antes de responder: el primer poll nunca da 404.
+    task_db.create_task(task_id, current_user.id)
     background_tasks.add_task(
         list_comparator.compare_items_background,
         task_id=task_id,
@@ -34,9 +37,7 @@ def get_comparison_results(
     """
     Consulta el estado y/o el resultado de una tarea de comparación.
     """
-    from app.task_db import tasks 
-    task = tasks.get(task_id)
+    task = task_db.get_task(task_id, current_user.id)
     if not task:
-        raise HTTPException(status_code=404, detail="Tarea no encontrada o aún no ha comenzado.")
-    
+        raise HTTPException(status_code=404, detail="Tarea no encontrada.")
     return task
