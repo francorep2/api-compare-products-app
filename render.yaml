@@ -2,11 +2,14 @@
 previews:
   generation: off
 
+# Planes free para probar. Para producción estable subir a un plan pago vigente (el plan "starter"
+# de Postgres ya no existe para bases nuevas; usar p. ej. basic-256mb) y el web a "starter".
+# OJO: la base free de Render expira a los ~30 días.
 databases:
   - name: groceries-db
     databaseName: groceries
     user: groceries_user
-    plan: starter
+    plan: free
     region: virginia
     postgresMajorVersion: "17"
 
@@ -14,7 +17,7 @@ services:
   - type: web
     name: groceries-api
     runtime: docker
-    plan: starter
+    plan: free
     region: virginia
     healthCheckPath: /health
     envVars:
