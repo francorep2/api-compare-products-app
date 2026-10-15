@@ -55,7 +55,7 @@ async def compare_items_background(
 
     async def _one(store: str, name: str) -> List[Dict]:
         async with sem:
-            return await search_store(store, q=name, limit=3)
+            return await search_store(store, q=name, limit=6)
 
     try:
         grid = await asyncio.gather(*[

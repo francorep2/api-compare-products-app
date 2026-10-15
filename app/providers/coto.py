@@ -26,15 +26,30 @@ class CotoStore:
     name = "coto"
 
     def _price(self, data: Dict) -> Optional[float]:
+        """Precio unitario de góndola. OJO: `formatPrice` es el precio por unidad de
+        medida (kilo, m², etc.), no el del producto; el unitario es `listPrice`
+        (de la sucursal) o el `discountPrice` de la promo vigente."""
         prices = data.get("price") or []
         mine = next((p for p in prices if p.get("store") == SUCURSAL), None) or (prices[0] if prices else None)
-        if mine:
-            return mine.get("formatPrice") or mine.get("listPrice")
-        return data.get("product_list_price")
+        regular = (mine or {}).get("listPrice") or data.get("product_list_price")
+        if not regular:
+            return None
+        best = float(regular)
+        for d in data.get("discounts") or []:
+            m = re.search(r"[\d.]+", str(d.get("discountPrice") or "").replace(",", ""))
+            if not m:
+                continue
+            try:
+                promo = float(m.group(0))
+            except ValueError:
+                continue
+            if 0.2 * float(regular) <= promo < best:  # descarta valores absurdos
+                best = promo
+        return best
 
     def _promo(self, data: Dict) -> Optional[str]:
         for d in data.get("discounts") or []:
-            txt = d.get("discountText") or d.get("takingText") or d.get("comments")
+            txt = d.get("discountText") or d.get("takingText")
             if txt:
                 return short_promo(txt) or str(txt).strip()
         return None

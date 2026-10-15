@@ -1,96 +1,87 @@
+"""Matching de un ítem de la lista contra los resultados de una tienda."""
+from __future__ import annotations
+
 import re
 import unicodedata
-from typing import Set, List, Dict, Optional
+from typing import Dict, List, Optional
 
-# --- CONSTANTES Y DICCIONARIOS DE HEURÍSTICA ---
-STOP = {"de","del","la","el","los","las","con","sin","x","por","y","en","a","al","para","un","una"}
-CAT_FAMILY = {"leche", "galletitas", "pan", "queso", "fideos", "arroz", "jabon", "shampoo"} # (versión simplificada)
-VARIANTS = {"light", "zero", "integral", "chocolate", "vainilla"} # (versión simplificada)
+STOP = {
+    "de", "del", "la", "el", "los", "las", "con", "sin", "x", "por", "y", "en", "a", "al",
+    "para", "un", "una", "u", "unidad", "unidades",
+}
+_UNIT = re.compile(r"^\d+(\.\d+)?(lts?|l|kgs?|kg|grs?|gr|g|ml|cc|mts?|m|un|unid)$")
 
+MIN_SCORE = 0.25
 
-def _strip_accents(s: str) -> str:
-    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
 
 def _norm(s: str) -> str:
-    s = (s or "").lower().strip()
-    s = _strip_accents(s)
-    # Patrón mejorado para no separar números de unidades comunes (ej: 1l, 500g)
-    s = re.sub(r'(\d+)\s*(lts?|kgs?|grs?|ml|g|kg)\b', r'\1\2', s)
-    s = re.sub(r"[^\w\s]", " ", s)
-    s = re.sub(r"\s{2,}", " ", s)
-    return s.strip()
+    s = "".join(c for c in unicodedata.normalize("NFKD", (s or "").lower()) if not unicodedata.combining(c))
+    s = re.sub(r"(\d)[.,](\d)", r"\1.\2", s)  # 2,25 -> 2.25
+    s = re.sub(r"(\d+(?:\.\d+)?)\s*(lts?|kgs?|grs?|ml|cc|mts?|g|kg|l)\b", r"\1\2", s)  # "500 g" -> "500g"
+    s = re.sub(r"[^\w\s.]", " ", s)
+    return re.sub(r"\s{2,}", " ", s).strip()
 
-def _tokens(s: str) -> list[str]:
-    toks = _norm(s).split()
-    return [t for t in toks if t not in STOP]
 
-def _is_size_or_unit(token: str) -> bool:
-    """Verifica si un token es una unidad de medida o un tamaño."""
-    return re.fullmatch(r'\d+(lts?|kgs?|grs?|ml|g|kg|unidades|u)', token) is not None
+def _stem(t: str) -> str:
+    """Singular/plural simple: huevos ~ huevo, galletitas ~ galletita."""
+    if len(t) > 4 and t.endswith("es") and t[-3] in "lnrdz":
+        return t[:-2]
+    if len(t) > 3 and t.endswith("s"):
+        return t[:-1]
+    return t
 
-# --- FUNCIONES DE COMPARACIÓN Y SELECCIÓN (Mejoradas) ---
 
-def _similarity(a: str, b: str) -> float:
-    # (Tu función de similitud es buena, la mantenemos)
-    A, B = set(_tokens(a)), set(_tokens(b))
-    return (len(A & B) / len(A | B)) if A and B else 0.0
+def _canon_unit(t: str) -> str:
+    return re.sub(r"(lts|lt)$", "l", re.sub(r"(kgs)$", "kg", re.sub(r"(grs|gr)$", "g", t)))
 
-def _split_keywords(q: str) -> (Set[str], Set[str], Set[str]):
-    toks, brands, cats, desc = _tokens(q), [], [], []
-    for t in toks:
-        if _is_size_or_unit(t): # <-- IGNORAMOS LOS TAMAÑOS
+
+def _tokens(s: str) -> List[str]:
+    out = []
+    for t in _norm(s).split():
+        t = t.strip(".")
+        if not t or t in STOP:
             continue
-        if t in CAT_FAMILY: cats.append(t)
-        elif t in VARIANTS: desc.append(t)
-        else: brands.append(t)
-    # ... (tu lógica de dedup)
-    return set(brands), set(cats), set(desc)
+        out.append(_canon_unit(t) if _UNIT.match(t) else _stem(t))
+    return out
 
-def _must_match(title: str, brand_tokens: Set[str], cat_tokens: Set[str]) -> bool:
-    T = set(_tokens(title))
-    # Ahora es más flexible: debe coincidir la marca, y si especificamos categoría, también.
-    has_brand = (len(T & brand_tokens) > 0) if brand_tokens else True
-    has_cat = (len(T & cat_tokens) > 0) if cat_tokens else True
-    return has_brand and has_cat
-    
-def pick_best_one(
-    candidates: List[Dict], 
-    expected_name: str, 
-    brand_tokens: Set[str], 
-    cat_tokens: Set[str], 
-    min_score=0.25 # <-- 1. UMBRAL MÁS BAJO (antes 0.40)
-) -> Optional[Dict]:
-    best_item, best_score = None, -1.0
-    
-    # --- 2. LOGS DE DEPURACIÓN ---
 
-    for item in (candidates or []):
-        title = (item.get("title") or "").strip()
-        if not title: continue
-        
-        
-        passes_must_match = _must_match(title, brand_tokens, cat_tokens)
-        if not passes_must_match:
-            continue
-            
-        score = _similarity(title, expected_name)
+def _split(tokens: List[str]):
+    sizes = {t for t in tokens if _UNIT.match(t) or t.replace(".", "").isdigit()}
+    words = {t for t in tokens if t not in sizes}
+    return words, sizes
 
-        if score > best_score:
-            best_item, best_score = item, score
-            
-    if best_item and best_score < min_score:
+
+def _score(query: str, title: str) -> Optional[float]:
+    qw, qs = _split(_tokens(query))
+    tw, ts = _split(_tokens(title))
+    if not qw:
         return None
-        
-    return best_item
+    covered = len(qw & tw) / len(qw)
+    # consultas cortas ("azucar ledesma") exigen todas las palabras; las largas toleran alguna menos
+    if covered < (1.0 if len(qw) <= 2 else 0.6):
+        return None
+    jaccard = len(qw & tw) / len(qw | tw)
+    size_bonus = 0.15 if qs and (qs & ts) else 0.0
+    return covered * 0.6 + jaccard * 0.25 + size_bonus
+
+
+def _price(r: Dict) -> float:
+    try:
+        return float(str(r.get("price")).replace("ARS", "").strip())
+    except ValueError:
+        return float("inf")
 
 
 def find_best_match_for_item(item_name: str, results: List[Dict]) -> Optional[Dict]:
-    if not results:
-        return None
-    brand_tokens, cat_tokens, _ = _split_keywords(item_name)
-    return pick_best_one(
-        candidates=results,
-        expected_name=item_name,
-        brand_tokens=brand_tokens,
-        cat_tokens=cat_tokens
-    )
+    """Mejor resultado para el ítem, o None si ninguno se parece lo suficiente.
+    A igual calidad de match gana el más barato."""
+    best, best_score = None, -1.0
+    for r in results or []:
+        if not (r.get("title") or "").strip() or not r.get("price"):
+            continue
+        sc = _score(item_name, r["title"])
+        if sc is None:
+            continue
+        if sc > best_score + 1e-9 or (abs(sc - best_score) <= 1e-9 and best and _price(r) < _price(best)):
+            best, best_score = r, sc
+    return best if best is not None and best_score >= MIN_SCORE else None

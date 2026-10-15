@@ -19,11 +19,15 @@ except ImportError:  # pragma: no cover
     _HTTP2 = False
 
 _client: Optional[httpx.AsyncClient] = None
+_client_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 def get_client() -> httpx.AsyncClient:
-    global _client
-    if _client is None or _client.is_closed:
+    global _client, _client_loop
+    loop = asyncio.get_running_loop()
+    # las conexiones viven en un event loop: si cambió (tests, reload) se recrea el cliente
+    if _client is None or _client.is_closed or _client_loop is not loop:
+        _client_loop = loop
         _client = httpx.AsyncClient(
             http2=_HTTP2,
             headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
