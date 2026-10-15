@@ -78,12 +78,15 @@ class StoreItemOut(BaseModel):
 # --- SCHEMAS PARA LA PETICIÓN DE COMPARACIÓN ---
 
 class ComparisonItemIn(BaseModel):
-    nombre: str
-    cantidad: int = 1
+    nombre: str = Field(min_length=1, max_length=200)
+    cantidad: int = Field(default=1, ge=1, le=99)
+    barcode: Optional[str] = Field(default=None, max_length=32)  # EAN: compara el MISMO producto en todas las tiendas
 
 class ComparisonRequestIn(BaseModel):
-    items: List[ComparisonItemIn]
+    items: List[ComparisonItemIn] = Field(min_length=1, max_length=60)
     enabled: Optional[List[str]] = None
+    list_id: Optional[int] = None
+    title: Optional[str] = Field(default=None, max_length=120)
 
 
 # --- SCHEMAS PARA LA RESPUESTA DE COMPARACIÓN ---
