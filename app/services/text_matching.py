@@ -63,30 +63,22 @@ def pick_best_one(
     best_item, best_score = None, -1.0
     
     # --- 2. LOGS DE DEPURACIÓN ---
-    print(f"\n--- Analizando '{expected_name}' ---")
-    print(f"[Keywords]: brands={brand_tokens}, cats={cat_tokens}")
 
     for item in (candidates or []):
         title = (item.get("title") or "").strip()
         if not title: continue
         
-        print(f"  [Candidato]: {title}")
         
         passes_must_match = _must_match(title, brand_tokens, cat_tokens)
         if not passes_must_match:
-            print("    -> Descartado por: No pasar _must_match")
             continue
             
         score = _similarity(title, expected_name)
-        print(f"    -> Score Similitud: {score:.2f}")
 
         if score > best_score:
             best_item, best_score = item, score
             
-    print(f"[Mejor Match]: {best_item.get('title') if best_item else 'Ninguno'}")
-    print(f"[Mejor Score]: {best_score:.2f}")
     if best_item and best_score < min_score:
-        print(f"  -> Descartado por: Score < umbral ({min_score})")
         return None
         
     return best_item

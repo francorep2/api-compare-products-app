@@ -13,7 +13,6 @@ def edit_my_profile(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    print("DEBUG current_user:", current_user)
 
     user = update_user_profile(
         db=db,
