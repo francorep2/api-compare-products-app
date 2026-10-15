@@ -34,7 +34,7 @@ async def lifespan(app):
         await close_http()
 
 
-app = FastAPI(title="Groceries API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Changuito API (beta)", version="2.0.0-beta", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # Routers

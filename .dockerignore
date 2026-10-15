@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+tests
+docker
+render.yaml
+.env
+.env.*
+*.db
+node_modules

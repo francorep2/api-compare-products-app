@@ -2,7 +2,7 @@ import os, smtplib, socket, ssl, json, urllib.request, urllib.error
 from email.mime.text import MIMEText
 import certifi
 
-APP_NAME = os.getenv("APP_NAME", "Comparador Super")
+APP_NAME = os.getenv("APP_NAME", "Changuito Beta")
 MAIL_FROM = os.getenv("MAIL_FROM", "no-reply@example.com")
 
 # ---- SMTP config ----
