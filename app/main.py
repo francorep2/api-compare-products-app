@@ -12,34 +12,28 @@ from app.routers import user, barcode, support, list_comparator
 from app.routers.search_config import router as search_config_router
 
 from contextlib import asynccontextmanager
-from app.core.browser_async import browser_manager_async  # <- único manager
+import asyncio
 
-# (Opcional) si querés centralizar dominios bloqueados para pasarlos al contexto en cada provider
-BLOCKED_DOMAINS = {"googletagmanager.com", "google-analytics.com", "facebook.net", "doubleclick.net"}
+from fastapi.middleware.gzip import GZipMiddleware
 
-def should_block_request(route):
-    if route.request.resource_type in {"image", "stylesheet", "font", "media"}:
-        return True
-    return any(d in route.request.url for d in BLOCKED_DOMAINS)
+from app.providers import close_http, warm_up
+
 
 @asynccontextmanager
 async def lifespan(app):
-    # Arranca 1 solo browser compartido
-    print("[API] Iniciando browser_manager_async...")
-    await browser_manager_async.startup()  # <- sin headless; el manager decide
-    print("[API] Browser listo.")
-
     # Si querés crear tablas al boot:
     Base.metadata.create_all(bind=engine)
-
+    # Conexiones HTTP/2 precalentadas a las tiendas (no bloquea el arranque)
+    warm = asyncio.create_task(warm_up())
     try:
         yield
     finally:
-        print("[API] Cerrando browser_manager_async...")
-        await browser_manager_async.shutdown()
-        print("[API] Browser cerrado.")
+        warm.cancel()
+        await close_http()
 
-app = FastAPI(title="Groceries API", version="1.0.0", lifespan=lifespan)
+
+app = FastAPI(title="Groceries API", version="2.0.0", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # Routers
 app.include_router(auth_router)
@@ -50,6 +44,7 @@ app.include_router(barcode.router)
 app.include_router(search_config_router)
 app.include_router(support.router)
 app.include_router(list_comparator.router)
+
 
 @app.get("/health")
 def health():

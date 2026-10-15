@@ -11,7 +11,7 @@ API (FastAPI + PostgreSQL) que compara precios de supermercados argentinos
 
 ## Estructura
 - `app/routers` endpoints · `app/services` lógica y wrappers de scrapers · `app/auth` usuarios/OTP/JWT
-- `scrapers/` scrapers por tienda (Coto con Playwright; Carrefour/Jumbo/Día vía VTEX)
+- `app/providers/` una integración HTTP por tienda: Coto (buscador Constructor.io del sitio) y Carrefour/Jumbo/Día (API pública VTEX). Cliente `httpx` compartido (HTTP/2, keep-alive), cache de 10 min y límite de concurrencia por host. Sin navegador.
 - `docker/` Postgres + API para desarrollo · `Dockerfile` + `render.yaml` deploy en Render
 
 ## Correr local
@@ -19,10 +19,14 @@ API (FastAPI + PostgreSQL) que compara precios de supermercados argentinos
 cp .env.example .env          # completar JWT_SECRET, SENDGRID_API_KEY, etc.
 docker compose -f docker/docker-compose.yml up
 # o sin docker:
-pip install -r requirements.txt && playwright install --with-deps chromium
+pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 Docs interactivas en `http://localhost:8000/docs`, health check en `/health`.
+
+## Rendimiento
+- Búsqueda en las 4 tiendas: ~0,3–1 s (cacheada: instantánea). Búsqueda por código de barras: ~0,3 s.
+- Comparar una lista de 15 productos en 4 tiendas: ~2–3 s.
 
 ## Notas
 - El estado de las comparaciones (`app/task_db.py`) vive en memoria: se pierde al reiniciar y requiere 1 solo worker.
