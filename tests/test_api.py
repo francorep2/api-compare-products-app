@@ -115,3 +115,64 @@ def test_cors_preflight_allows_web_origin(client):
     assert r.headers["access-control-allow-origin"] == "http://localhost:5173"
     r = client.options("/auth/login", headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "POST"})
     assert "access-control-allow-origin" not in r.headers
+
+
+def test_compare_result_has_lines_optimal_and_savings(client):
+    body = {"items": [{"nombre": "leche entera", "cantidad": 2}, {"nombre": "arroz gallo", "cantidad": 1}],
+            "enabled": ["coto", "dia"], "title": "Semana", "list_id": 7}
+    tid = client.post("/compare/start", json=body).json()["task_id"]
+    res = client.get(f"/compare/results/{tid}").json()
+    assert res["title"] == "Semana" and res["list_id"] == 7 and res["created_at"]
+    d = res["data"]
+    assert d["items_count"] == 2 and d["stores"] == ["coto", "dia"]
+    # línea por producto con la oferta de cada tienda y la más barata
+    leche = d["lines"][0]
+    assert leche["name"] == "leche entera" and leche["quantity"] == 2
+    assert leche["offers"]["coto"]["price"] == 100 and leche["offers"]["dia"]["price"] == 90
+    assert leche["cheapest"] == "dia"
+    assert d["lines"][1]["cheapest"] == "coto"  # arroz: coto 300 < dia 350
+    # mejor combinación: leche en dia (2x90) + arroz en coto (300) = 480, mejor que coto (500) y dia (530)
+    assert d["optimal"]["total"] == 480 and d["optimal"]["stores_used"] == ["coto", "dia"]
+    assert d["optimal"]["savings_vs_winner"] == 20  # vs ganador coto (500)
+    assert d["winner"] == "coto"
+    assert d["savings"]["amount"] == 30 and d["savings"]["vs_store"] == "dia"  # 530 - 500
+
+
+def test_compare_with_barcode_searches_exact_product(client, monkeypatch):
+    calls = []
+
+    class EanStore(FakeStore):
+        async def search(self, q, barcode, limit):
+            calls.append((q, barcode))
+            if barcode == "7790000000001":
+                return [_item(self.name, "Leche Exacta Entera", 111)]
+            return []
+
+    monkeypatch.setitem(providers.STORES, "coto", EanStore("coto", []))
+    body = {"items": [{"nombre": "leche", "cantidad": 1, "barcode": "7790000000001"}], "enabled": ["coto"]}
+    tid = client.post("/compare/start", json=body).json()["task_id"]
+    d = client.get(f"/compare/results/{tid}").json()["data"]
+    assert d["lines"][0]["offers"]["coto"]["found_name"] == "Leche Exacta Entera"
+    assert (None, "7790000000001") in calls
+
+
+def test_compare_history_and_delete(client):
+    body = {"items": [{"nombre": "leche entera", "cantidad": 1}], "title": "A", "list_id": 3}
+    t1 = client.post("/compare/start", json=body).json()["task_id"]
+    t2 = client.post("/compare/start", json={**body, "title": "B", "list_id": 4}).json()["task_id"]
+    hist = client.get("/compare/history").json()
+    assert [h["title"] for h in hist] == ["B", "A"]  # más recientes primero
+    assert hist[0]["winner"] and hist[0]["totals"]["coto"] == 100 and hist[0]["items_count"] == 1
+    assert [h["id"] for h in client.get("/compare/history", params={"list_id": 3}).json()] == [t1]
+    # el historial es privado
+    USER["id"] = "2"
+    assert client.get("/compare/history").json() == []
+    assert client.delete(f"/compare/{t1}").status_code == 404
+    USER["id"] = "1"
+    assert client.delete(f"/compare/{t2}").status_code == 204
+    assert [h["id"] for h in client.get("/compare/history").json()] == [t1]
+
+
+def test_compare_request_validation(client):
+    assert client.post("/compare/start", json={"items": []}).status_code == 422
+    assert client.post("/compare/start", json={"items": [{"nombre": "x", "cantidad": 0}]}).status_code == 422
