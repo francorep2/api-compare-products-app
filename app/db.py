@@ -15,14 +15,11 @@ def _pg_url():
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Engine con pool
-engine = create_engine(
-    DATABASE_URL,
-    future=True,
-    pool_size=5,              
-    max_overflow=5,
-    pool_pre_ping=True,     
-)
+# Engine con pool (SQLite, usado en tests, no soporta estos parámetros)
+_engine_kwargs = {"future": True}
+if DATABASE_URL and not DATABASE_URL.startswith("sqlite"):
+    _engine_kwargs.update(pool_size=5, max_overflow=5, pool_pre_ping=True)
+engine = create_engine(DATABASE_URL, **_engine_kwargs)
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
 

@@ -3,8 +3,7 @@ import os
 from typing import Optional, Dict, Any
 from jose import jwt, JWTError
 
-JWT_SECRET = os.getenv("JWT_SECRET")
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+from app.core.settings import JWT_SECRET, JWT_ALGORITHM
 JWT_SUB_CLAIM = os.getenv("JWT_SUB_CLAIM", "sub")  # por si tu login usa 'user_id' u otro
 
 class TokenError(Exception):

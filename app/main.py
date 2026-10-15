@@ -16,13 +16,15 @@ import asyncio
 
 from fastapi.middleware.gzip import GZipMiddleware
 
+from app.core.settings import APP_ENV
 from app.providers import close_http, warm_up
 
 
 @asynccontextmanager
 async def lifespan(app):
-    # Si querés crear tablas al boot:
-    Base.metadata.create_all(bind=engine)
+    # En producción el esquema lo maneja Alembic (ver Dockerfile); en dev creamos las tablas al vuelo.
+    if APP_ENV == "dev":
+        Base.metadata.create_all(bind=engine)
     # Conexiones HTTP/2 precalentadas a las tiendas (no bloquea el arranque)
     warm = asyncio.create_task(warm_up())
     try:

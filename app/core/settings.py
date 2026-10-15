@@ -1,36 +1,30 @@
 # app/core/settings.py
+import logging
 import os
 
-def _build_db_url_from_parts():
-    host = os.getenv("DB_HOST", "localhost")
-    port = os.getenv("DB_PORT", "5432")
-    name = os.getenv("DB_NAME", "groceries")
-    user = os.getenv("DB_USER", "appuser")
-    pwd  = os.getenv("DB_PASS", "super-secret")
-    ssl  = os.getenv("DB_SSLMODE", "disable")
-    return f"postgresql://{user}:{pwd}@{host}:{port}/{name}?sslmode={ssl}"
+log = logging.getLogger("settings")
 
-DATABASE_URL = os.getenv("DATABASE_URL") or _build_db_url_from_parts()
+# "dev" permite arrancar sin JWT_SECRET (solo desarrollo local). Cualquier otro valor = producción.
+APP_ENV = os.getenv("APP_ENV", "production").lower()
 
-# Email / SMTP / SendGrid
-USE_SENDGRID_API = os.getenv("USE_SENDGRID_API", "1") == "1"
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
-MAIL_FROM = os.getenv("MAIL_FROM", "no-reply@example.com")
+_WEAK_SECRETS = {"", "change-me", "dev-secret-change-me", "secret", "changeme"}
+_DEV_FALLBACK = "dev-only-insecure-secret"
 
-SMTP_CFG = {
-    "dry_run": os.getenv("SMTP_DRY_RUN", "0") == "1",
-    "host": os.getenv("SMTP_HOST", "smtp.sendgrid.net"),
-    "port": int(os.getenv("SMTP_PORT", "2525")),
-    "user": os.getenv("SMTP_USER", "apikey"),
-    "password": os.getenv("SMTP_PASS", ""),
-    "use_tls": os.getenv("SMTP_TLS", "1") == "1",
-    "use_ssl": os.getenv("SMTP_SSL", "0") == "1",
-    "timeout": int(os.getenv("SMTP_TIMEOUT", "20")),
-}
 
-APP_NAME = os.getenv("APP_NAME", "Comparador Super")
+def get_jwt_secret() -> str:
+    """Secreto JWT. En producción es obligatorio y no puede ser uno de los valores de ejemplo."""
+    secret = (os.getenv("JWT_SECRET") or "").strip()
+    if secret.lower() not in _WEAK_SECRETS:
+        return secret
+    if APP_ENV == "dev":
+        log.warning("JWT_SECRET no definido: usando secreto inseguro de desarrollo (APP_ENV=dev)")
+        return _DEV_FALLBACK
+    raise RuntimeError(
+        "JWT_SECRET no está definido o es un valor de ejemplo. Definí un secreto largo y aleatorio "
+        "(p. ej. `python -c \"import secrets; print(secrets.token_urlsafe(48))\"`) "
+        "o usá APP_ENV=dev solo en desarrollo local."
+    )
 
-# JWT
-JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-JWT_SUB_CLAIM = os.getenv("JWT_SUB_CLAIM", "sub")
+
+JWT_SECRET = get_jwt_secret()
+JWT_ALGORITHM = "HS256"
