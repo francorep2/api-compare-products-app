@@ -53,6 +53,8 @@ class MeOut(BaseModel):
     id: int
     email: EmailStr
     is_verified: bool
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
 
 class UserUpdateIn(BaseModel):
     email: Optional[EmailStr] = None
