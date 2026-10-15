@@ -2,7 +2,7 @@
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from app.routers.auth import router as auth_router
 from app.routers.shopping_list import router as shopping_list
 from app.routers.scrap import router as scrap_router
@@ -51,3 +51,16 @@ app.include_router(list_comparator.router)
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/health/db")
+def health_db():
+    """Toca la base: sirve de ping periódico para que Supabase free no pause el proyecto."""
+    from sqlalchemy import text
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("select 1"))
+    except Exception:
+        raise HTTPException(status_code=503, detail="Base de datos no disponible")
+    return {"status": "ok", "db": "ok"}
