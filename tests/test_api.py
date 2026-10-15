@@ -103,3 +103,15 @@ def test_health_db_returns_503_when_database_down(client, monkeypatch):
     r = client.get("/health/db")
     assert r.status_code == 503
     assert "db caída" not in r.text
+
+
+def test_cors_preflight_allows_web_origin(client):
+    r = client.options(
+        "/auth/login",
+        headers={"Origin": "http://localhost:5173", "Access-Control-Request-Method": "POST",
+                 "Access-Control-Request-Headers": "authorization,content-type"},
+    )
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == "http://localhost:5173"
+    r = client.options("/auth/login", headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "POST"})
+    assert "access-control-allow-origin" not in r.headers

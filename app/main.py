@@ -14,6 +14,9 @@ from app.routers.search_config import router as search_config_router
 from contextlib import asynccontextmanager
 import asyncio
 
+import os
+
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from app.core.settings import APP_ENV
@@ -36,6 +39,16 @@ async def lifespan(app):
 
 app = FastAPI(title="Changuito API (beta)", version="2.0.0-beta", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# CORS para la versión web. CORS_ORIGINS = lista separada por comas; CORS_ORIGIN_REGEX para previews.
+_default_origins = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in os.getenv("CORS_ORIGINS", _default_origins).split(",") if o.strip()],
+    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX") or None,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Routers
 app.include_router(auth_router)
