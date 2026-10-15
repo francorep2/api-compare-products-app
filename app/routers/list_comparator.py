@@ -1,11 +1,3 @@
-from fastapi import APIRouter, Depends, BackgroundTasks, status, HTTPException
-from sqlalchemy.orm import Session
-from app import db, models
-from app.schemas import shopping_list
-from app.dependencies.auth import get_current_user, User
-from app.services import list_comparator
-
-router = APIRouter(prefix="/lists", tags=["Shopping Lists"])
 import uuid
 from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException, status
 from app.schemas import shopping_list
