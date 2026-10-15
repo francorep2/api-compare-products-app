@@ -1,4 +1,4 @@
-# Groceries API — Comparador Super
+# Changuito (beta) — API comparador de precios
 
 API (FastAPI + PostgreSQL) que compara precios de supermercados argentinos
 (**Coto, Carrefour, Jumbo y Día**). Front: [front-compare-products-app](https://github.com/francorep2/front-compare-products-app).
@@ -23,6 +23,12 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 Docs interactivas en `http://localhost:8000/docs`, health check en `/health`.
+
+## Deploy en Railway
+- `railway.json` + `Dockerfile` (imagen ~360 MB, sin navegador). Healthcheck en `/health`.
+- Servicios: `api` (este repo, enlazado a GitHub: cada push a `main` despliega) + `Postgres`. Variables de la API: `DATABASE_URL` (referencia al Postgres), `JWT_SECRET` (aleatorio), `APP_NAME`, `MAIL_FROM` (con Resend debe ser un remitente de un dominio verificado, p. ej. `Changuito <no-reply@tu-dominio>`) y `RESEND_API_KEY` para enviar los códigos por mail. Sin clave de mail, los códigos salen por los logs (`SMTP_DRY_RUN=1`). También se soportan SendGrid (`USE_SENDGRID_API=1` + `SENDGRID_API_KEY`) y SMTP.
+- La configuración del servicio vive en `.railway/railway.ts` (infraestructura como código de Railway).
+- Deploy desde la carpeta del repo: `railway up`.
 
 ## Configuración y base de datos
 - `JWT_SECRET` es **obligatorio** en producción (la app no arranca sin uno real). Generar: `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Para desarrollo local usá `APP_ENV=dev` (ver `.env.example`).

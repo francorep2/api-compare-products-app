@@ -1,23 +1,13 @@
 FROM python:3.11-slim
-ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PORT=8000 WORKERS=2
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/app
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential curl ca-certificates libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Solo wheels binarios (psycopg2-binary, bcrypt, cryptography): no hace falta compilador.
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# 👇 requirements.txt está en la RAÍZ del repo
-COPY ./requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip && pip install -r /app/requirements.txt
-RUN pip install gunicorn uvicorn[standard]
-
-
-# Resto del código (también desde la raíz)
-COPY . /app
-
-ENV PYTHONPATH=/app
+COPY . .
 
 EXPOSE 8000
-CMD bash -lc '\
-  alembic upgrade head && \
-  python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --log-level info'
+# Railway/Render inyectan $PORT. Las migraciones corren antes de levantar; si fallan, el deploy falla.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --log-level info"]

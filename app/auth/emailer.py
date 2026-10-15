@@ -2,7 +2,7 @@ import os, smtplib, socket, ssl, json, urllib.request, urllib.error
 from email.mime.text import MIMEText
 import certifi
 
-APP_NAME = os.getenv("APP_NAME", "Comparador Super")
+APP_NAME = os.getenv("APP_NAME", "Changuito Beta")
 MAIL_FROM = os.getenv("MAIL_FROM", "no-reply@example.com")
 
 # ---- SMTP config ----
@@ -14,6 +14,9 @@ SMTP_TLS  = os.getenv("SMTP_TLS", "1") == "1"   # STARTTLS (587 / 2525)
 SMTP_SSL  = os.getenv("SMTP_SSL", "0") == "1"   # SSL directo (465)
 SMTP_TIMEOUT = int(os.getenv("SMTP_TIMEOUT", "10"))
 SMTP_DRY_RUN = os.getenv("SMTP_DRY_RUN", "0") == "1"
+
+# ---- Resend (API HTTPS) ----
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 
 # ---- SendGrid Web API config ----
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY") or os.getenv("SMTP_PASS")
@@ -52,6 +55,26 @@ def _send_via_sendgrid_api(to_email: str, subject: str, body: str):
             raise RuntimeError(f"SendGrid API status {resp.status}")
     print(f"[MAIL->sendgrid API OK] To:{to_email} From:{MAIL_FROM}")
 
+def _send_via_resend(to_email: str, subject: str, body: str):
+    if not RESEND_API_KEY:
+        raise RuntimeError("Falta RESEND_API_KEY")
+    payload = {"from": MAIL_FROM, "to": [to_email], "subject": subject, "text": body}
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+            # Resend está detrás de Cloudflare: sin User-Agent propio rechaza urllib (error 1010)
+            "User-Agent": f"{APP_NAME.replace(' ', '-')}/2.0",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15, context=_cert_context()) as resp:
+        if resp.status not in (200, 201, 202):
+            raise RuntimeError(f"Resend API status {resp.status}")
+    print(f"[MAIL->resend OK] To:{to_email} From:{MAIL_FROM}")
+
 def _send_via_smtp(to_email: str, subject: str, body: str):
     if SMTP_DRY_RUN or not (SMTP_HOST and SMTP_USER and SMTP_PASS):
         reason = "DRY_RUN" if SMTP_DRY_RUN else "MISSING_CREDS"
@@ -87,6 +110,18 @@ def send_email(to_email: str, subject: str, body: str, strict: bool = False):
     if not MAIL_FROM:
         if strict: raise ValueError("MAIL_FROM vacío")
         print("[MAIL][WARN] MAIL_FROM vacío"); return
+
+    if RESEND_API_KEY:
+        try:
+            _send_via_resend(to_email, subject, body)
+            return
+        except Exception as e:  # noqa: BLE001
+            body_err = e.read().decode("utf-8", "replace")[:300] if isinstance(e, urllib.error.HTTPError) else ""
+            print(f"[MAIL][ERROR] Resend falló: {type(e).__name__}: {e} {body_err}")
+            if strict:
+                raise
+            _console_mail(to_email, subject, body)
+            return
 
     try:
         if USE_SENDGRID_API:
