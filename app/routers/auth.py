@@ -322,7 +322,8 @@ def me(
     if not user or not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Usuario inválido")
 
-    return S.MeOut(id=user.id, email=user.email, is_verified=user.is_verified)
+    return S.MeOut(id=user.id, email=user.email, is_verified=user.is_verified,
+                   first_name=user.first_name, last_name=user.last_name)
 
 # ------------------------ Editar usuario ------------------------
 
