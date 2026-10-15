@@ -90,3 +90,16 @@ def test_compare_flow_and_ownership(client):
 
 def test_health_db_touches_database(client):
     assert client.get("/health/db").json() == {"status": "ok", "db": "ok"}
+
+
+def test_health_db_returns_503_when_database_down(client, monkeypatch):
+    import app.main as main
+
+    class BrokenEngine:
+        def connect(self):
+            raise RuntimeError("db caída")
+
+    monkeypatch.setattr(main, "engine", BrokenEngine())
+    r = client.get("/health/db")
+    assert r.status_code == 503
+    assert "db caída" not in r.text
