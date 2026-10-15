@@ -1,63 +1,34 @@
-# render.yaml
+# Beta: API en Render (plan free) + base Postgres en Supabase (plan free).
+# La base NO vive en Render (su Postgres free expira a los 30 días).
+#
+# Crear: Render > New > Blueprint > este repo (rama main). Render pide DATABASE_URL:
+# pegar la cadena del "Session pooler" de Supabase (Project > Connect), región us-east-1.
+# El web free se duerme a los 15 min sin uso (la primera consulta tarda ~1 min en despertar).
 previews:
   generation: off
 
-# Planes free para probar. Para producción estable subir a un plan pago vigente (el plan "starter"
-# de Postgres ya no existe para bases nuevas; usar p. ej. basic-256mb) y el web a "starter".
-# OJO: la base free de Render expira a los ~30 días.
-databases:
-  - name: groceries-db
-    databaseName: groceries
-    user: groceries_user
-    plan: free
-    region: virginia
-    postgresMajorVersion: "17"
-
 services:
   - type: web
-    name: groceries-api
+    name: changuito-api
     runtime: docker
     plan: free
     region: virginia
     healthCheckPath: /health
+    autoDeploy: true
     envVars:
-      # DB: usa la URL interna privada de Render (mejor latencia)
       - key: DATABASE_URL
-        fromDatabase:
-          name: groceries-db
-          property: connectionString
+        sync: false  # Supabase > Connect > Session pooler (postgresql://postgres.<ref>:<clave>@aws-0-us-east-1.pooler.supabase.com:5432/postgres)
+      - key: JWT_SECRET
+        generateValue: true  # Render genera un secreto aleatorio
+      - key: APP_NAME
+        value: "Changuito Beta"
 
-      # Email / SendGrid (completa en el deploy)
-      - key: USE_SENDGRID_API
-        value: "1"
-      - key: SENDGRID_API_KEY
+      # Mails: con Resend. Sin RESEND_API_KEY los códigos OTP salen por los logs.
+      - key: RESEND_API_KEY
         sync: false
       - key: MAIL_FROM
-        value: "francorep02@gmail.com"
-
+        sync: false  # p. ej. Changuito <no-reply@tu-dominio-verificado>
       - key: SMTP_DRY_RUN
+        value: "1"  # poner 0 al cargar RESEND_API_KEY
+      - key: USE_SENDGRID_API
         value: "0"
-      - key: SMTP_HOST
-        value: "smtp.sendgrid.net"
-      - key: SMTP_PORT
-        value: "2525"
-      - key: SMTP_USER
-        value: "apikey"
-      - key: SMTP_PASS
-        sync: false
-      - key: SMTP_TLS
-        value: "1"
-      - key: SMTP_SSL
-        value: "0"
-      - key: SMTP_TIMEOUT
-        value: "20"
-      - key: APP_NAME
-        value: "Comparador Super"
-
-      # JWT
-      - key: JWT_SECRET
-        generateValue: true  # Render genera un secreto aleatorio al crear el servicio
-      - key: JWT_ALGORITHM
-        value: "HS256"
-      - key: JWT_SUB_CLAIM
-        value: "sub"

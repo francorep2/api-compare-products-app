@@ -86,3 +86,7 @@ def test_compare_flow_and_ownership(client):
     USER["id"] = "2"
     assert client.get(f"/compare/results/{tid}").status_code == 404
     assert client.get("/compare/results/no-existe").status_code == 404
+
+
+def test_health_db_touches_database(client):
+    assert client.get("/health/db").json() == {"status": "ok", "db": "ok"}

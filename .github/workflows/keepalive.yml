@@ -1,0 +1,16 @@
+name: keepalive
+# Supabase free pausa el proyecto tras 1 semana sin actividad. Este ping diario toca la base
+# (GET /health/db) y de paso despierta el web free de Render.
+# Configurar la variable del repo API_URL (Settings > Secrets and variables > Actions > Variables),
+# p. ej. https://changuito-api.onrender.com
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+jobs:
+  ping:
+    if: ${{ vars.API_URL != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /health/db (reintenta mientras Render despierta)
+        run: curl -fsS --retry 6 --retry-delay 15 --retry-all-errors --max-time 90 "${{ vars.API_URL }}/health/db"

@@ -30,6 +30,11 @@ Docs interactivas en `http://localhost:8000/docs`, health check en `/health`.
 - La configuración del servicio vive en `.railway/railway.ts` (infraestructura como código de Railway; reemplaza a `railway.json`, deprecado). Para previsualizar/aplicar cambios: `npm install` y `railway config plan` / `railway config apply` (en Windows hace falta apuntar la variable `_` al `railway.exe` nativo).
 - Deploy desde la carpeta del repo: `railway up`.
 
+## Deploy alternativo: Render (API) + Supabase (base)
+- `render.yaml` crea solo el web service (plan free). La base es un proyecto de **Supabase**; en Render se pega `DATABASE_URL` con la cadena del *Session pooler* (`...pooler.supabase.com:5432`, funciona por IPv4).
+- Las migraciones corren solas al arrancar (`alembic upgrade head` en el Dockerfile).
+- `/health/db` toca la base; el workflow `keepalive.yml` lo llama a diario (variable de repo `API_URL`) para que Supabase free no pause el proyecto.
+
 ## Configuración y base de datos
 - `JWT_SECRET` es **obligatorio** en producción (la app no arranca sin uno real). Generar: `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Para desarrollo local usá `APP_ENV=dev` (ver `.env.example`).
 - El esquema se maneja con **Alembic** (`alembic/`). El Dockerfile corre `alembic upgrade head` antes de levantar el server y falla el deploy si la migración falla. Nueva migración: `alembic revision -m "descripcion"`.

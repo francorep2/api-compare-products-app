@@ -51,3 +51,13 @@ app.include_router(list_comparator.router)
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/health/db")
+def health_db():
+    """Toca la base: sirve de ping periódico para que Supabase free no pause el proyecto."""
+    from sqlalchemy import text
+
+    with engine.connect() as conn:
+        conn.execute(text("select 1"))
+    return {"status": "ok", "db": "ok"}
