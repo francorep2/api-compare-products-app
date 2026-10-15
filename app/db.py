@@ -13,7 +13,15 @@ def _pg_url():
     sslmode = os.getenv("DB_SSLMODE")  
     return f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{name}?sslmode={sslmode}"
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+def normalize_db_url(url):
+    if url and url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url and url.startswith("postgresql://"):
+        url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+    return url
+
+
+DATABASE_URL = normalize_db_url(os.getenv("DATABASE_URL"))
 
 # Engine con pool (SQLite, usado en tests, no soporta estos parámetros)
 _engine_kwargs = {"future": True}

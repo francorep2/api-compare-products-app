@@ -27,3 +27,14 @@ def test_dev_allows_fallback(monkeypatch):
     assert s.JWT_SECRET
     # restaura el estado que usa el resto de los tests
     _reload(monkeypatch, APP_ENV="dev", JWT_SECRET="test-secret-no-usar-en-prod")
+
+
+def test_db_url_forces_psycopg2_driver():
+    # SQLAlchemy 2.1 cambió el driver por defecto de "postgresql://" a psycopg 3 (no instalado)
+    from app.db import normalize_db_url
+
+    assert normalize_db_url("postgresql://u:p@h/db") == "postgresql+psycopg2://u:p@h/db"
+    assert normalize_db_url("postgres://u:p@h/db") == "postgresql+psycopg2://u:p@h/db"
+    assert normalize_db_url("postgresql+psycopg2://u:p@h/db") == "postgresql+psycopg2://u:p@h/db"
+    assert normalize_db_url("sqlite://") == "sqlite://"
+    assert normalize_db_url(None) is None

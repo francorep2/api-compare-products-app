@@ -13,7 +13,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Importar todos los modelos para que queden en Base.metadata
-from app.db import Base  # noqa: E402
+from app.db import Base, normalize_db_url  # noqa: E402
 import app.auth.models  # noqa: E402,F401
 import app.models  # noqa: E402,F401
 import app.models.comparison  # noqa: E402,F401
@@ -23,7 +23,7 @@ target_metadata = Base.metadata
 
 
 def _url() -> str:
-    url = os.getenv("DATABASE_URL")
+    url = normalize_db_url(os.getenv("DATABASE_URL"))
     if not url:
         raise RuntimeError("DATABASE_URL no está definido")
     return url
