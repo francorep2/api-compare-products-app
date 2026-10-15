@@ -1,2 +1,20 @@
+# env / secrets
 .env
-debug".env" 
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# node (no se usa en este repo)
+node_modules/
+
+# editores / SO
+.vscode/
+.idea/
+.DS_Store
