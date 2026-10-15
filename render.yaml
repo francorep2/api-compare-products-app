@@ -53,7 +53,7 @@ services:
 
       # JWT
       - key: JWT_SECRET
-        sync: false
+        generateValue: true  # Render genera un secreto aleatorio al crear el servicio
       - key: JWT_ALGORITHM
         value: "HS256"
       - key: JWT_SUB_CLAIM
