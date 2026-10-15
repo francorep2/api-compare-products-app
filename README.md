@@ -26,7 +26,8 @@ Docs interactivas en `http://localhost:8000/docs`, health check en `/health`.
 
 ## Deploy en Railway
 - `railway.json` + `Dockerfile` (imagen ~360 MB, sin navegador). Healthcheck en `/health`.
-- Servicios: `api` (este repo) + `Postgres`. Variables de la API: `DATABASE_URL` (referencia al Postgres), `JWT_SECRET` (aleatorio), `MAIL_FROM`, `SENDGRID_API_KEY` y `USE_SENDGRID_API=1` para enviar los códigos por mail (con `SMTP_DRY_RUN=1` salen por consola/logs).
+- Servicios: `api` (este repo, enlazado a GitHub: cada push a `main` despliega) + `Postgres`. Variables de la API: `DATABASE_URL` (referencia al Postgres), `JWT_SECRET` (aleatorio), `APP_NAME`, `MAIL_FROM` (con Resend debe ser un remitente de un dominio verificado, p. ej. `Changuito <no-reply@tu-dominio>`) y `RESEND_API_KEY` para enviar los códigos por mail. Sin clave de mail, los códigos salen por los logs (`SMTP_DRY_RUN=1`). También se soportan SendGrid (`USE_SENDGRID_API=1` + `SENDGRID_API_KEY`) y SMTP.
+- La configuración del servicio vive en `.railway/railway.ts` (infraestructura como código de Railway).
 - Deploy desde la carpeta del repo: `railway up`.
 
 ## Configuración y base de datos
